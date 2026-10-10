@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -114,6 +115,16 @@ class PlannerTests(unittest.TestCase):
             {"service": "adservice", "action": "rm-rf", "rationale": "not allowed"}]}
         picks = planner._validate_llm(raw, g, cfg, 5)
         self.assertEqual([p["service"] for p in picks], ["cartservice"])
+
+    def test_explicit_llm_requires_gemini(self):
+        with patch("chaosai.planner.llm.available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "Gemini is unavailable"):
+                planner.plan(mapper.build_graph(MANIFEST), config.load(None), mode="llm")
+
+    def test_explicit_rule_based_does_not_call_gemini(self):
+        with patch("chaosai.planner.llm.available", side_effect=AssertionError("must not check Gemini")):
+            result = planner.plan(mapper.build_graph(MANIFEST), config.load(None), mode="rule-based")
+        self.assertEqual(result["planner"], "rule-based")
 
 
 class ReportTests(unittest.TestCase):

@@ -122,9 +122,11 @@ python3 -m chaosai agent --rounds 3     # the header line now shows "planner (ll
 ```bash
 python3 -m pip install google-genai
 export GEMINI_API_KEY=your-gemini-api-key
-python3 -m chaosai plan --n 4
+python3 -m chaosai plan --planner llm --n 4
 ```
 The model defaults to `gemini-3.8-flash`; override it with `CHAOSAI_MODEL` if needed.
+Choose `--planner rule-based` to force local rules, or `--planner auto` to use Gemini when available
+and otherwise fall back to the rules. The same option is available on `agent`.
 
 ## Commands
 
