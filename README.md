@@ -13,8 +13,8 @@ Built for the Bosch hackathon problem statement "AI-Driven Chaos Engineering for
 | Sandbox | Local Kubernetes cluster with [kind](https://kind.sigs.k8s.io/) |
 | Fault injection | [Chaos Mesh](https://chaos-mesh.org/) |
 | Language | Python 3.10+ |
-| Agent orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) state graph |
-| LLM | Google Gemini through LangChain, with a rule-based fallback when no key is set |
+| Agent orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) state graph, with a Python-loop fallback |
+| LLM | Google Gemini through LangChain or the Google Gen AI SDK; rule-based fallback is recorded |
 
 ## How it works
 
@@ -78,21 +78,46 @@ so the Planner targets them first. To regenerate: `python3 -m chaosai map` write
 pip install -r requirements.txt
 python3 -m unittest discover -s tests
 python3 -m chaosai --sim map
-python3 -m chaosai --sim baseline
-python3 -m chaosai --sim agent --rounds 3
+python3 -m chaosai --sim baseline --seconds 15
+python3 -m chaosai --sim agent --rounds 1 --planner rule-based
 ```
 Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
 The simulator is a toy model for development; its numbers are not real results.
 A pre-generated example report is in `docs/sample-report.html`.
 
-### On a real cluster
+### Gemini-powered simulation
+
+This stays offline from Kubernetes: `--sim` selects the simulator, while `--planner llm`
+requests Gemini for agent decisions. Install the requirements, then enter the key without placing it
+in shell history or committing it:
+
+```bash
+read -s -p "Gemini API key: " GEMINI_API_KEY
+export GEMINI_API_KEY
+printf '\n'
+python3 -m chaosai --sim map
+python3 -m chaosai --sim baseline --seconds 15
+python3 -m chaosai --sim agent --rounds 1 --planner llm
+```
+
+The model is selected from `config.yaml` and can be overridden with `CHAOSAI_MODEL`. Gemini
+responses use structured JSON output; transient service errors receive bounded retries. When
+Gemini remains unavailable or returns unusable content, the affected decision may use explicit
+rule-based fallback. The generated results/report identify Gemini use and fallbacks. A quota
+exhaustion response cannot be fixed by retrying repeatedly; wait for the quota reset or check the
+Gemini project quota and billing.
+
+### Real Kubernetes experiments
+
+These commands can inject actual faults. **Do not run them against a cluster unless you have
+permission and have reviewed the target, duration, allowlist, and safety limits.** This task does
+not run live experiments.
 
 Prerequisites: Docker, kind, kubectl, helm, Python 3.10+, and about 8 GB of free memory for Docker.
 
 **Linux or macOS**
 ```bash
-./setup.sh                                          # kind + Online Boutique + Chaos Mesh
-kubectl port-forward deployment/frontend 8080:8080  # separate terminal, keep running
+./setup.sh
 ```
 
 **Windows, or by hand**
@@ -107,11 +132,32 @@ helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace -
 kubectl port-forward deployment/frontend 8080:8080  # separate terminal, keep running
 ```
 
-Check that `http://localhost:8080` shows the shop, then run the agent loop:
+Before proceeding, check the current Kind context, all app deployments, Chaos Mesh, and the
+frontend port-forward:
+
+```bash
+kubectl config current-context
+kubectl get deployments,pods
+kubectl get pods -n chaos-mesh
+curl -fsS http://localhost:8080/ >/dev/null && echo "Frontend probe succeeded"
+```
+
+If the frontend check fails, keep the port-forward in a separate terminal:
+
+```bash
+kubectl port-forward deployment/frontend 8080:8080
+```
+
+After confirming the cluster and configured safety controls, map the services, take a live
+baseline, and review the generated plan before approving a fault-injection run:
+
 ```bash
 python3 -m chaosai map
 python3 -m chaosai baseline --seconds 60
-python3 -m chaosai agent --rounds 3
+python3 -m chaosai plan --n 3 --planner rule-based
+cat plan.json
+# Only after reviewing and explicitly approving the planned real faults:
+python3 -m chaosai run --plan plan.json
 ```
 
 ### Monitor faults you inject yourself (local Ollama)
@@ -148,23 +194,27 @@ warning events, and logs; approving a scale-up also requires permission to scale
 
 ### Turning on the LLM
 
+To use Gemini agents against a real cluster, first satisfy the real-cluster checks above. Avoid
+putting a key directly into a command:
+
 ```bash
-pip install -r requirements.txt          # includes langgraph and langchain-google-genai
-export GEMINI_API_KEY=your-gemini-api-key
-python3 -m chaosai agent --rounds 3 --planner llm
+read -s -p "Gemini API key: " GEMINI_API_KEY
+export GEMINI_API_KEY
+printf '\n'
+python3 -m chaosai agent --rounds 1 --planner llm
 ```
-The first line of the run then reads `Agents (llm)`, and the report names the Gemini model.
-The model defaults to `gemini-3.8-flash`; override it with `CHAOSAI_MODEL`.
 
 | `--planner` value | Behaviour |
 |---|---|
-| `auto` (default) | Agents use Gemini when a key is set, otherwise the local rules |
-| `llm` | Agents use Gemini, and the run stops with an error if it is unavailable at the start |
+| `auto` (default) | Use Gemini when configured and available; otherwise use the local rules |
+| `llm` | Request Gemini; transient API failure or unusable output is reported and can fall back to rules |
 | `rule-based` | Agents use the local rules only |
 
-If one agent gets an unusable answer from the model, that agent falls back to its rules for that round
-and the session continues. Set `CHAOSAI_LLM_BACKEND=google-genai` to call Gemini through Google's SDK
-instead of LangChain. Without LangGraph installed, the same agents run in a plain Python loop.
+If quota/rate limits prevent Gemini calls, check the returned retry guidance and your AI Studio
+quota; repeated requests do not restore an exhausted quota. The report labels Gemini, mixed, or
+rule-based decisions separately from the Kubernetes/simulator environment. Set
+`CHAOSAI_LLM_BACKEND=google-genai` to use Google's SDK instead of LangChain. Without LangGraph,
+the same agent steps run in a Python loop.
 
 ## Commands
 
@@ -181,7 +231,15 @@ instead of LangChain. Without LangGraph installed, the same agents run in a plai
 | `report` | Regenerates a report | Analyze and report |
 | `kill` | Panic button: stops the session and deletes all chaosai experiments | Safety controls |
 
-Add `--sim` before the command to use the simulator, for example `python3 -m chaosai --sim agent`.
+Add `--sim` before the command to use the offline simulator, for example
+`python3 -m chaosai --sim agent --rounds 1 --planner rule-based`.
+
+To open the newest generated report on Linux:
+
+```bash
+latest_report=$(ls -t runs/*/report.html | head -n 1)
+xdg-open "$latest_report"
+```
 
 ## The agents
 

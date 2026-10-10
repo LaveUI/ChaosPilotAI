@@ -268,6 +268,73 @@ class SimulatedRunTests(unittest.TestCase):
         self.assertEqual(len(ids), 10)
 
 
+class LlmTransportTests(unittest.TestCase):
+    def setUp(self):
+        from chaosai import llm
+        self.llm = llm
+        self.cfg = config.load(None)
+
+    def test_json_parser_accepts_fenced_object_and_rejects_other_shapes(self):
+        self.assertEqual(self.llm._parse('```json\n{"ok": true}\n```'), {"ok": True})
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            self.llm._parse("[1, 2]")
+        with self.assertRaises(ValueError):
+            self.llm._parse("not json")
+
+    def test_retries_transient_failure_then_records_success(self):
+        from unittest import mock
+
+        class ServiceUnavailable(Exception):
+            status_code = 503
+
+        metadata = {}
+        with mock.patch.object(self.llm, "backend", return_value="langchain"), \
+             mock.patch.object(self.llm, "_ask_langchain",
+                               side_effect=[ServiceUnavailable("busy"), {"summary": "ready"}]), \
+             mock.patch.object(self.llm.time, "sleep") as sleep:
+            result = self.llm.ask_json(self.cfg, "system", {}, schema={"type": "object"},
+                                       metadata=metadata)
+
+        self.assertEqual(result, {"summary": "ready"})
+        self.assertEqual(metadata["attempts"], 2)
+        self.assertEqual(metadata["retry_count"], 1)
+        self.assertTrue(metadata["succeeded"])
+        sleep.assert_called_once()
+
+    def test_long_retry_after_fails_without_unbounded_sleep(self):
+        from unittest import mock
+
+        class QuotaExceeded(Exception):
+            status_code = 429
+            retry_after = 4927
+
+        metadata = {}
+        with mock.patch.object(self.llm, "backend", return_value="langchain"), \
+             mock.patch.object(self.llm, "_ask_langchain", side_effect=QuotaExceeded("quota")), \
+             mock.patch.object(self.llm.time, "sleep") as sleep:
+            with self.assertRaises(QuotaExceeded):
+                self.llm.ask_json(self.cfg, "system", {}, metadata=metadata)
+
+        self.assertEqual(metadata["attempts"], 1)
+        self.assertEqual(metadata["retry_after_too_long"], 4927)
+        sleep.assert_not_called()
+
+    def test_nontransient_failure_is_not_retried(self):
+        from unittest import mock
+
+        class BadRequest(Exception):
+            status_code = 400
+
+        with mock.patch.object(self.llm, "backend", return_value="langchain"), \
+             mock.patch.object(self.llm, "_ask_langchain", side_effect=BadRequest("bad request")) as call, \
+             mock.patch.object(self.llm.time, "sleep") as sleep:
+            with self.assertRaises(BadRequest):
+                self.llm.ask_json(self.cfg, "system", {})
+
+        call.assert_called_once()
+        sleep.assert_not_called()
+
+
 class LlmAgentLoopTests(unittest.TestCase):
     """All five agents in LLM mode, with the model replaced by a scripted fake."""
 
@@ -294,7 +361,11 @@ class LlmAgentLoopTests(unittest.TestCase):
         picks = [list(p) for p in picks]
         overrides = overrides or {}
 
-        def fake(cfg, system, payload, max_tokens=1500):
+        def fake(cfg, system, payload, max_tokens=1500, schema=None, metadata=None):
+            if metadata is not None:
+                metadata.update({"provider": "Gemini", "model": "fake-model", "backend": "test",
+                                 "requested": True, "succeeded": True, "retry_count": 0,
+                                 "attempts": 1, "duration_s": 0.01})
             for key, answer in overrides.items():
                 if key in system:
                     return answer
@@ -322,8 +393,8 @@ class LlmAgentLoopTests(unittest.TestCase):
     def test_all_five_agents_use_the_llm(self):
         res = self.run_loop(self.scripted([[("productcatalogservice", "network-delay"), ("adservice", "cpu-stress")],
                                            [("shippingservice", "cpu-stress")]]))
-        self.assertEqual(res["agents"], {"observer": "llm", "planner": "llm", "injector": "llm",
-                                         "analyst": "llm", "reporter": "llm"})
+        self.assertEqual(res["agents"], {"observer": "Gemini", "planner": "Gemini", "injector": "Gemini",
+                                         "analyst": "Gemini", "reporter": "Gemini"})
         first = res["experiments"][0]
         self.assertEqual(first["duration_s"], 30)
         self.assertEqual(first["observation"]["summary"], "All deployments are ready.")
@@ -332,6 +403,13 @@ class LlmAgentLoopTests(unittest.TestCase):
                                                        "source": "llm"})
         self.assertIn("score", first)          # the score still comes from the fixed formula
         self.assertEqual(res["summary"], "Overall findings.")
+        self.assertEqual(res["llm_execution"]["overall_source"], "Gemini")
+        self.assertEqual(sum(call["gemini_used"] for call in res["agent_calls"]), len(res["agent_calls"]))
+        self.assertEqual({call["agent"] for call in res["agent_calls"]},
+                         {"observer", "planner", "injector", "analyst", "reporter"})
+        rendered = report.render(res, {"nodes": []})
+        self.assertIn("Agent execution overview", rendered)
+        self.assertIn("Per-decision Gemini and fallback provenance", rendered)
 
     def test_planner_ranks_candidates_and_skips_tested_ones(self):
         same = [("productcatalogservice", "network-delay"), ("adservice", "cpu-stress")]
@@ -374,8 +452,9 @@ class LlmAgentLoopTests(unittest.TestCase):
         self.assertTrue(res["experiments"][0]["aborted"])
 
     def test_llm_cannot_target_a_protected_service(self):
-        with self.assertRaises(RuntimeError):
-            self.run_loop(self.scripted([[("frontend", "pod-failure")]]), rounds=1)
+        res = self.run_loop(self.scripted([[("frontend", "pod-failure")]]), rounds=1)
+        self.assertTrue(res["experiments"])
+        self.assertNotIn("frontend", {exp["service"] for exp in res["experiments"]})
 
     def test_bad_answers_fall_back_to_rules(self):
         bad = {"observer agent": {"x": 1}, "analyst agent": {"nonsense": True}, "reporting agent": {"y": 2}}

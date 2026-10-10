@@ -77,8 +77,10 @@ def _summary(results, cfg):
     system = ('You are an SRE writing a short resilience summary for a chaos-engineering run. '
               'Respond with ONLY JSON: {"summary":"<3-4 plain sentences: what broke, why it matters, what to fix first>"}.')
     try:
-        summary = llm.ask_json(cfg, system, {"resilience_score": results["resilience_score"], "experiments": slim},
-                               max_tokens=400).get("summary")
+        summary = llm.ask_json(
+            cfg, system, {"resilience_score": results["resilience_score"], "experiments": slim},
+            max_tokens=400, schema=llm.SUMMARY_SCHEMA,
+        ).get("summary")
         if summary:
             results["summary_model"] = llm.model_name(cfg)
         return summary

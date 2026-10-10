@@ -25,6 +25,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 .chart-legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:8px 2px 14px}.legend-item{display:flex;align-items:center;gap:6px}.swatch{width:9px;height:9px;border-radius:50%;background:var(--swatch)}.legend-marker{font-weight:800;color:var(--marker);font-size:15px;line-height:1}
 svg.timeline{display:block;width:100%;height:auto;margin:8px 0 4px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px}svg{max-width:100%;height:auto}
 .experiment-heading{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:12px}.experiment-heading h3{font-size:18px;margin:0}.audit-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.audit-item{padding:12px;background:var(--surface-2);border-radius:9px;min-width:0}.audit-item b{display:block;margin-top:3px;font-size:13px;overflow-wrap:anywhere}.recommendation{padding:12px 0;border-top:1px solid var(--line)}.recommendation:first-child{border-top:0}.recommendation h4{margin:0 0 5px}.recommendation p{font-size:12px;color:var(--muted)}
+.agent-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.agent-panel{background:var(--surface-2);border:1px solid var(--line);border-radius:11px;padding:16px;min-width:0}.agent-panel h3{margin:0 0 8px}.provenance{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:3px 8px;display:inline-block}.reason-list{padding-left:18px}.round-label{display:inline-block;border-radius:6px;padding:3px 7px;background:var(--surface-2);color:var(--blue);font-size:11px;font-weight:700}
 .empty-state{padding:18px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}details{margin:12px 0}summary{cursor:pointer;color:var(--blue);font-weight:700;padding:5px 0}details>div,details>p{margin-top:10px}ul{margin:7px 0 0;padding-left:20px}li{padding:4px 0}.section-head{display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap;margin:30px 0 12px}.section-head h2{margin:0}.section-note{font-size:12px;color:var(--muted)}
 @media(max-width:1100px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.findings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.audit-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:740px){main{padding:24px 16px 48px}.hero{grid-template-columns:1fr}.phase-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-two{grid-template-columns:1fr}.flow-arrow{padding:0 5px}}
@@ -838,6 +839,342 @@ def _technical_appendix(results, graph, experiments):
     )
 
 
+def _source_label(source):
+    value = str(source or "").strip().lower()
+    if value in {"llm", "gemini"}:
+        return "Gemini"
+    if value in {"mixed", "mixed gemini + fallback"}:
+        return "Mixed Gemini + rule-based fallback"
+    if value:
+        return "Rule-based" if "rule" in value or "fallback" in value else str(source)
+    return "Not recorded"
+
+
+def _report_provenance(results):
+    execution = results.get("llm_execution") or {}
+    agents = results.get("agents") or {}
+    calls = results.get("agent_calls") or []
+    agent_workflow = bool(results.get("rounds") or results.get("orchestrator") or agents)
+    sources = [
+        _source_label(value)
+        for value in agents.values()
+    ] if isinstance(agents, dict) else []
+    if execution.get("overall_source"):
+        source = _source_label(execution["overall_source"])
+    elif any(value.startswith("Mixed") for value in sources):
+        source = "Mixed Gemini + rule-based fallback"
+    elif any(value == "Gemini" for value in sources) and any(value == "Rule-based" for value in sources):
+        source = "Mixed Gemini + rule-based fallback"
+    elif sources and all(value == "Gemini" for value in sources):
+        source = "Gemini-powered"
+    elif sources:
+        source = "Rule-based"
+    elif any(experiment.get("planner") == "llm" for experiment in results.get("experiments") or []):
+        source = "Gemini planner recorded; other agent provenance not recorded"
+    elif results.get("planner") == "llm":
+        source = "Gemini planner recorded; not a five-agent Gemini run"
+    elif agent_workflow:
+        source = "Agent execution source not fully recorded"
+    else:
+        source = "Planner/run source not recorded"
+
+    gemini_calls = sum(1 for call in calls if call.get("gemini_used"))
+    fallback_calls = sum(1 for call in calls if call.get("fallback_used"))
+    return {
+        "source": source,
+        "environment": (
+            "Offline simulator" if str(results.get("env", "")).lower() in {"sim", "simulated"}
+            else str(results.get("env", "Not recorded"))
+        ),
+        "model": (
+            results.get("requested_model") or results.get("llm_model")
+            or results.get("summary_model") or "Not recorded"
+        ),
+        "orchestrator": results.get("orchestrator") or "Not recorded",
+        "rounds": execution.get("rounds", len(results.get("rounds") or []) if results.get("rounds") else None),
+        "experiments": execution.get("completed_experiments", len(results.get("experiments") or [])),
+        "gemini_calls": gemini_calls if calls else None,
+        "fallback_calls": fallback_calls if calls else None,
+        "fallback_reason": execution.get("fallback_reason") or results.get("llm_fallback_reason"),
+    }
+
+
+def _agent_execution_section(results):
+    provenance = _report_provenance(results)
+    agent_status = results.get("agents") or {}
+    cards = []
+    for agent in ("observer", "planner", "injector", "analyst", "reporter"):
+        status = _source_label(agent_status.get(agent))
+        cards.append(
+            f"<div class='audit-item'><span class='metric-label'>{html.escape(agent.title())} Agent</span>"
+            f"<b>{html.escape(status)}</b></div>"
+        )
+    optional_counts = (
+        f"{provenance['gemini_calls']} successful Gemini call(s)"
+        if provenance["gemini_calls"] is not None else "Not recorded"
+    )
+    fallback_count = (
+        f"{provenance['fallback_calls']} fallback decision(s)"
+        if provenance["fallback_calls"] is not None else "Not recorded"
+    )
+    model_line = html.escape(str(provenance["model"]))
+    fallback = (
+        f"<p class='status-warn'><b>Fallback reason:</b> "
+        f"{html.escape(str(provenance['fallback_reason']))}</p>"
+        if provenance["fallback_reason"] else ""
+    )
+    calls = results.get("agent_calls") or []
+    call_table = ""
+    if calls:
+        call_rows = []
+        for call in calls:
+            call_rows.append(
+                f"<tr><td>{html.escape(str(call.get('agent', 'Not recorded')).title())}</td>"
+                f"<td>{html.escape(str(call.get('model') or 'Not recorded'))}</td>"
+                f"<td>{'Yes' if call.get('gemini_used') else 'No'}</td>"
+                f"<td>{'Yes' if call.get('fallback_used') else 'No'}</td>"
+                f"<td>{html.escape(str(call.get('retry_count', 0)))}</td>"
+                f"<td>{html.escape(str(call.get('duration_s', 'Not recorded')))} s</td>"
+                f"<td>{html.escape(str(call.get('fallback_reason') or '—'))}</td></tr>"
+            )
+        call_table = (
+            "<details><summary>Per-decision Gemini and fallback provenance</summary>"
+            "<div class='scroll'><table><thead><tr><th>Agent</th><th>Model</th><th>Gemini used</th>"
+            "<th>Fallback</th><th>Retries</th><th>Duration</th><th>Fallback reason</th></tr></thead><tbody>"
+            + "".join(call_rows) + "</tbody></table></div></details>"
+        )
+    return (
+        "<section><div class='section-head'><h2>Agent execution overview</h2>"
+        "<span class='section-note'>Execution source and orchestration metadata from this run</span></div>"
+        "<div class='panel'><div class='audit-grid'>"
+        f"<div class='audit-item'><span class='metric-label'>Decision provenance</span><b>{html.escape(provenance['source'])}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Execution environment</span><b>{html.escape(provenance['environment'])}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Requested / recorded model</span><b>{model_line}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Orchestrator</span><b>{html.escape(str(provenance['orchestrator']))}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Rounds</span><b>{html.escape(str(provenance['rounds'] if provenance['rounds'] is not None else 'Not recorded'))}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Completed experiments</span><b>{html.escape(str(provenance['experiments']))}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Gemini calls</span><b>{html.escape(optional_counts)}</b></div>"
+        f"<div class='audit-item'><span class='metric-label'>Fallbacks</span><b>{html.escape(fallback_count)}</b></div>"
+        + "".join(cards)
+        + f"</div>{fallback}"
+        + call_table
+        + "<p class='muted'>Environment and decision provenance are independent: a Kubernetes run can "
+        "be rule-based, mixed, or Gemini-powered. A model name alone does not prove that Gemini "
+        "generated every agent decision.</p></div></section>"
+    )
+
+
+def _cluster_observation_html(snapshot):
+    if not isinstance(snapshot, dict):
+        return "<p class='muted'>Cluster-level pod and warning observations were not recorded.</p>"
+    groups = (
+        ("Unhealthy pods", snapshot.get("unhealthy_pods") or []),
+        ("Pods with restarts", snapshot.get("pods_with_restarts") or []),
+        ("Warnings", snapshot.get("warning_events") or []),
+    )
+    content = []
+    for label, entries in groups:
+        if entries:
+            content.append(f"<p><b>{html.escape(label)}:</b> "
+                           f"{html.escape('; '.join(str(item) for item in entries))}</p>")
+        else:
+            content.append(f"<p><b>{html.escape(label)}:</b> None recorded in this snapshot.</p>")
+    not_ready = snapshot.get("deployments_not_ready") or {}
+    content.append(
+        "<p><b>Deployments not ready:</b> "
+        + (
+            html.escape(", ".join(map(str, not_ready.keys())))
+            if not_ready else "None recorded."
+        )
+        + "</p>"
+    )
+    return "".join(content)
+
+
+def _observer_planner_sections(results):
+    rounds = results.get("rounds")
+    if not isinstance(rounds, list) or not rounds:
+        return (
+            "<section><div class='section-head'><h2>Observer &amp; Planner Agent</h2></div>"
+            "<div class='empty-state'>Round observations and candidate rankings were not saved in "
+            "this result; they cannot be reconstructed from experiment scores alone.</div></section>"
+        )
+    cards = []
+    for entry in rounds:
+        round_number = entry.get("round", "Not recorded")
+        observation = entry.get("observation") or {}
+        observed_by = _source_label(observation.get("source"))
+        concerns = observation.get("concerns") or []
+        probes = observation.get("probes") or []
+        probe_summary = (
+            f"{sum(1 for probe in probes if probe.get('ok'))}/{len(probes)} probes succeeded"
+            if probes else "Probe detail not recorded"
+        )
+        ranked = entry.get("ranked_candidates") or []
+        if ranked:
+            candidate_rows = []
+            for candidate in ranked:
+                candidate_rows.append(
+                    f"<tr><td>{html.escape(str(candidate.get('rank', 'N/A')))}</td>"
+                    f"<td>{html.escape(str(candidate.get('service', 'Unknown')))}</td>"
+                    f"<td>{html.escape(str(candidate.get('action', 'Unknown')))}</td>"
+                    f"<td>{'<b>Selected</b>' if candidate.get('chosen') else ''}</td>"
+                    f"<td>{html.escape(str(candidate.get('rationale', 'Not recorded')))}</td></tr>"
+                )
+            ranked_html = (
+                "<div class='scroll'><table><thead><tr><th>Rank</th><th>Service</th><th>Fault</th>"
+                "<th>Decision</th><th>Rationale</th></tr></thead><tbody>"
+                + "".join(candidate_rows) + "</tbody></table></div>"
+            )
+        else:
+            ranked_html = "<p class='muted'>Ranked candidate list not recorded for this round.</p>"
+        planner_source = _source_label((entry.get("planner_provenance") or {}).get("source"))
+        planner_reason = (entry.get("planner_provenance") or {}).get("fallback_reason")
+        observation_text = html.escape(str(observation.get("summary", "Observation not recorded.")))
+        concern_text = html.escape(", ".join(map(str, concerns)) or "None recorded")
+        cards.append(
+            f"<article class='agent-panel'><div class='row'><h3>Round {html.escape(str(round_number))}</h3>"
+            "<span class='provenance'>Observer: " + html.escape(observed_by) + "</span></div>"
+            f"<p><b>Health:</b> {html.escape(str(observation.get('healthy', 'Not recorded')))} · "
+            f"{html.escape(probe_summary)}</p><p><b>Summary:</b> {observation_text}</p>"
+            f"<p><b>Unhealthy service concerns:</b> {concern_text}</p>"
+            + _cluster_observation_html(observation.get("cluster"))
+            + f"<p><b>Planner source:</b> {html.escape(planner_source)}</p>"
+            + (f"<p class='status-warn'><b>Planner fallback:</b> {html.escape(str(planner_reason))}</p>"
+               if planner_reason else "")
+            + ranked_html
+            + "</article>"
+        )
+    return (
+        "<section><div class='section-head'><h2>Observer &amp; Planner Agent</h2>"
+        "<span class='section-note'>Health evidence and ranked candidate choices by round</span></div>"
+        "<div class='agent-grid'>" + "".join(cards) + "</div></section>"
+    )
+
+
+def _reporter_section(results):
+    report_data = results.get("ai_report")
+    if not isinstance(report_data, dict):
+        fallback = results.get("weaknesses") or []
+        rows = "".join(
+            f"<tr><td>{index}</td><td>Not recorded</td>"
+            f"<td>{html.escape(str(item.get('service', 'Unknown')))}</td>"
+            f"<td>{html.escape(str(item.get('action', 'Unknown')))}</td>"
+            f"<td>{html.escape(str(item.get('score', 'N/A')))}</td>"
+            "<td>Reporter explanation not saved.</td></tr>"
+            for index, item in enumerate(fallback, 1)
+        )
+        table = (
+            "<div class='scroll'><table><thead><tr><th>Rank</th><th>Severity</th><th>Service</th>"
+            "<th>Fault</th><th>Score</th><th>Reporter explanation</th></tr></thead><tbody>"
+            + rows + "</tbody></table></div>"
+            if rows else "<div class='empty-state'>Reporter Agent output and a fallback weakness list were not saved.</div>"
+        )
+        return (
+            "<section><div class='section-head'><h2>Reporter Agent</h2></div>"
+            "<div class='panel'><p class='muted'>Reporter summary and score explanation were not "
+            "saved. The table below, if present, uses code-calculated weakness data and is not "
+            "a Gemini Reporter output.</p>" + table + "</div></section>"
+        )
+    ranked = report_data.get("ranked_weaknesses") or []
+    rows = []
+    for index, item in enumerate(ranked, 1):
+        rows.append(
+            f"<tr><td>{index}</td><td>{html.escape(str(item.get('severity', 'Not recorded')))}</td>"
+            f"<td>{html.escape(str(item.get('service', 'Unknown')))}</td>"
+            f"<td>{html.escape(str(item.get('action', 'Unknown')))}</td>"
+            f"<td>{html.escape(str(item.get('score', 'N/A')))}</td>"
+            f"<td>{html.escape(str(item.get('why', 'Not recorded')))}</td></tr>"
+        )
+    source = _source_label(report_data.get("source"))
+    overall = report_data.get("overall")
+    score_explanation = report_data.get("score_explanation")
+    return (
+        "<section><div class='section-head'><h2>Reporter Agent</h2>"
+        f"<span class='provenance'>{html.escape(source)}</span></div><div class='panel'>"
+        "<h3>Overall investigation summary</h3>"
+        + (
+            f"<p>{html.escape(str(overall))}</p>"
+            if overall else "<p class='muted'>No Reporter overall summary was saved.</p>"
+        )
+        + "<h3>Weaknesses Ranked by Severity</h3>"
+        + (
+            "<div class='scroll'><table><thead><tr><th>Rank</th><th>Severity</th><th>Service</th>"
+            "<th>Fault type</th><th>Resilience score</th><th>Reporter explanation</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table></div>"
+            if rows else "<p class='muted'>No ranked weakness entries were saved.</p>"
+        )
+        + "<h3>Resilience score explanation</h3>"
+        + (
+            f"<p>{html.escape(str(score_explanation))}</p>"
+            if score_explanation else "<p class='muted'>No Reporter score explanation was saved.</p>"
+        )
+        + "</div></section>"
+    )
+
+
+def _injector_decision_section(experiment, limits, round_decision=None):
+    decision = experiment.get("injector_decision") or round_decision
+    if not isinstance(decision, dict):
+        decision = {}
+    approval = decision.get("approved")
+    decision_text = (
+        "Approved" if approval is True else "Rejected" if approval is False else
+        "Fault ran; preflight decision metadata not recorded"
+    )
+    source = _source_label(decision.get("source"))
+    requested = decision.get("requested_duration_s", experiment.get("duration_s"))
+    events = experiment.get("events") or {}
+    injected = _number(events.get("fault_injected_at_s"))
+    removed = _number(events.get("fault_removed_at_s"))
+    actual = decision.get("actual_duration_s")
+    if injected is not None and removed is not None:
+        actual = max(0.0, removed - injected)
+    actual_text = f"{_number(actual):.1f} s" if _number(actual) is not None else "Not recorded"
+    reason = decision.get("reason") or experiment.get("injector_reason")
+    rollback = experiment.get("agent_rollback")
+    cleanup = (
+        "Confirmed by runner" if experiment.get("cleanup_confirmed") is True else
+        "Not confirmed" if experiment.get("cleanup_confirmed") is False else "Not recorded"
+    )
+    abort_reason = experiment.get("abort_reason")
+    threshold_text = (
+        f"error ≤ {_fmt_rate(limits.get('max_error_rate'))}; "
+        f"p95 ≤ {_fmt_ms(limits.get('p95_limit_ms'))}; "
+        f"extra unhealthy pods ≤ {html.escape(str(limits.get('max_extra_unhealthy_pods', 'N/A')))}"
+    )
+    fallback = decision.get("fallback_reason")
+    return (
+        "<div class='agent-panel'><h3>Injector Agent decision</h3>"
+        f"<p><b>{html.escape(decision_text)}</b> · {html.escape(source)}</p>"
+        f"<p><b>Reason:</b> {html.escape(str(reason or 'Decision reasoning not recorded.'))}</p>"
+        f"<p><b>Requested duration:</b> {html.escape(str(requested if requested is not None else 'N/A'))} s · "
+        f"<b>Actual fault duration:</b> {actual_text}</p>"
+        f"<p><b>Safety thresholds:</b> {threshold_text}</p>"
+        f"<p><b>Early rollback:</b> {html.escape(str(rollback or 'No early rollback recorded'))}</p>"
+        f"<p><b>Automatic abort:</b> {html.escape(str(abort_reason or 'Not triggered'))}</p>"
+        f"<p><b>Cleanup verification:</b> {html.escape(cleanup)}</p>"
+        + (f"<p class='status-warn'><b>Fallback:</b> {html.escape(str(fallback))}</p>" if fallback else "")
+        + "</div>"
+    )
+
+
+def _round_for_experiment(experiment, rounds):
+    experiment_id = str(experiment.get("id", ""))
+    for entry in rounds if isinstance(rounds, list) else []:
+        ranked = entry.get("ranked_candidates") or []
+        if any(
+            candidate.get("chosen")
+            and candidate.get("service") == experiment.get("service")
+            and candidate.get("action") == experiment.get("action")
+            for candidate in ranked
+        ):
+            return entry
+        if experiment_id.startswith("exp") and str(entry.get("round")) == experiment_id[3:]:
+            return entry
+    return None
+
+
 def render(results, graph, previous=None):
     e = html.escape
     experiments = results.get("experiments") or []
@@ -924,6 +1261,9 @@ def render(results, graph, previous=None):
         "<span class='section-note'>Ranked by measured resilience score · recorded severity shown only when available</span></div>"
         + _finding_cards(experiments, baseline) + "</section>"
     )
+    parts.append(_agent_execution_section(results))
+    parts.append(_observer_planner_sections(results))
+    parts.append(_reporter_section(results))
 
     parts.append(
         "<section><div class='section-head'><h2>Recommended next actions</h2>"
@@ -949,6 +1289,7 @@ def render(results, graph, previous=None):
     parts.append("<section><div class='section-head'><h2>Experiment details</h2>"
                  "<span class='section-note'>Four measured phases, probe timeline, and recovery</span></div>")
     for experiment in experiments:
+        round_entry = _round_for_experiment(experiment, results.get("rounds"))
         service = e(str(experiment.get("service", "Unknown service")))
         action_raw = str(experiment.get("action", "Unknown fault"))
         action = e(action_raw.replace("-", " ").title())
@@ -969,6 +1310,10 @@ def render(results, graph, previous=None):
             f"{round_context(experiment)}"
             f"<p class='muted'><b>{rationale_label}:</b> "
             f"{e(str(experiment.get('rationale', 'Not recorded.')))}</p>"
+            + _injector_decision_section(
+                experiment, results.get("limits") or {},
+                (round_entry or {}).get("injector_decision"),
+            )
             + (
                 f"<p><b>Recorded analyst diagnosis:</b> "
                 f"{e(str(experiment.get('ai_diagnosis')))}"
@@ -976,6 +1321,25 @@ def render(results, graph, previous=None):
                    if experiment.get("ai_severity") else "")
                 + "</p>"
                 if experiment.get("ai_diagnosis") else ""
+            )
+            + (
+                "<div class='agent-panel'><h3>Analyst Agent evidence &amp; hypotheses</h3>"
+                + (
+                    "<p><b>Root-cause hypotheses:</b></p><ul class='reason-list'>"
+                    + "".join(f"<li>{e(str(item))}</li>" for item in experiment["root_cause_hypotheses"])
+                    + "</ul>"
+                    if experiment.get("root_cause_hypotheses") else
+                    "<p class='muted'>No root-cause hypotheses were recorded.</p>"
+                )
+                + (
+                    "<p><b>Evidence:</b></p><ul class='reason-list'>"
+                    + "".join(f"<li>{e(str(item))}</li>" for item in experiment["analyst_evidence"])
+                    + "</ul>"
+                    if experiment.get("analyst_evidence") else
+                    "<p class='muted'>No separate analyst evidence list was recorded; use the measured phase data below.</p>"
+                )
+                + f"<p><b>Analyst source:</b> {e(str((experiment.get('agent_provenance') or {}).get('analyst', {}).get('source', experiment.get('analyst', 'Not recorded'))))}</p>"
+                "</div>"
             )
             + timeline_svg(
                 experiment.get("samples"), events=experiment.get("events"),
