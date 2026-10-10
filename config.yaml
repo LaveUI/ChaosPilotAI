@@ -30,6 +30,22 @@ llm:
   enabled: true                # needs GEMINI_API_KEY; otherwise rule-based planner is used
   model: gemini-3.8-flash      # override with env CHAOSAI_MODEL
 
+local_agent:
+  ollama_url: http://127.0.0.1:11434
+  model: qwen2.5:3b
+  ollama_timeout_s: 120
+  keep_alive: 10m
+  num_ctx: 4096
+  num_predict: 192
+  interval_s: 5
+  window_samples: 5
+  min_samples: 3
+  error_rate_threshold: 0.2
+  p95_factor: 5.0
+  min_p95_ms: 1500
+  max_replicas: 4
+  recovery_samples: 3
+
 # Manual corrections to the dependency map
 graph_overrides:
   add_edges: []                # e.g. [["checkoutservice", "redis-cart"]]

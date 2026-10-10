@@ -114,6 +114,38 @@ python3 -m chaosai baseline --seconds 60
 python3 -m chaosai agent --rounds 3
 ```
 
+### Monitor faults you inject yourself (local Ollama)
+
+The `monitor` command is separate from `agent`: it does not inject faults. It continuously checks the
+configured HTTP URLs and Kubernetes deployment/pod health, warning events, and recent logs for
+unhealthy pods. On an incident it asks the local Ollama model for a diagnosis. It can offer a
+human-approved scale-up only for an affected, stateless app deployment; it will not scale Redis or
+protected services. No change is made unless you type `yes`. Incident records are appended to
+`runs/monitor/incidents.jsonl`.
+The monitor keeps Ollama's model loaded for 10 minutes after a diagnosis and limits generated output
+to keep incident responses concise; adjust `keep_alive`, `num_ctx`, and `num_predict` under
+`local_agent` if needed. The console shows when diagnosis starts and how long it took. A smaller
+Ollama model can be selected in config for faster responses on CPU, with a possible quality trade-off.
+
+Install/start Ollama and download the configured model:
+
+```bash
+ollama pull qwen2.5:3b
+ollama serve                         # only if Ollama is not already running
+```
+
+Keep the frontend port-forward running in another terminal, then start the monitor:
+
+```bash
+python3 -m chaosai map
+python3 -m chaosai baseline --seconds 30
+python3 -m chaosai monitor
+```
+
+Leave the monitor running while you manually inject a fault through the Chaos Mesh dashboard or
+`kubectl`. Stop it with Ctrl+C. The monitor needs Kubernetes read access to deployments, pods,
+warning events, and logs; approving a scale-up also requires permission to scale a deployment.
+
 ### Turning on the LLM
 
 ```bash
@@ -141,6 +173,7 @@ instead of LangChain. Without LangGraph installed, the same agents run in a plai
 | `map` | Parses manifests into `graph.json` + `graph.mmd` | Application mapping |
 | `baseline` | Measures normal error rate and p95 latency | Monitoring baseline |
 | `agent --rounds 3` | Agent graph: observe, plan, inject and analyze one experiment per round, then rank the findings | Plan, inject, observe, analyze, report |
+| `monitor` | Observe manually injected faults and request local Ollama diagnosis | External fault monitoring |
 | `plan --n 3` | Chooses a fixed list of experiments and explains why | Plan experiments |
 | `run` | Runs a saved plan with safety limits, scores it, writes the HTML report | First failure, safety controls |
 | `fix` | Applies safe automatic fixes (scale to 2 replicas) from the last run | Recommend fixes |

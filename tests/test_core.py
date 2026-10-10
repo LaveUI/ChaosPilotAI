@@ -338,5 +338,57 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(obs["concerns"], ["adservice"])
 
 
+class LocalMonitorTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config.load(None)
+        self.graph = mapper.build_graph(MANIFEST)
+
+    def test_ollama_endpoint_must_be_loopback(self):
+        from chaosai.local_agent import _endpoint
+        self.assertEqual(_endpoint("http://127.0.0.1:11434"), "http://127.0.0.1:11434/api/chat")
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            _endpoint("http://example.com:11434")
+
+    def test_ollama_diagnosis_keeps_model_warm_and_bounds_generation(self):
+        from chaosai import local_agent
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"message":{"content":"{\\"diagnosis\\":\\"ok\\"}"}}'
+
+        with patch("chaosai.local_agent.urllib.request.urlopen", return_value=Response()) as urlopen:
+            result = local_agent.diagnose(self.cfg, {"incident": "test"})
+
+        request, timeout = urlopen.call_args.args
+        body = json.loads(request.data)
+        self.assertEqual(result["diagnosis"], "ok")
+        self.assertEqual(body["keep_alive"], "10m")
+        self.assertEqual(body["options"]["num_predict"], 192)
+        self.assertEqual(timeout, 120)
+
+    def test_only_affected_stateless_services_can_be_offered_for_scale(self):
+        from chaosai.local_agent import LocalMonitorAgent
+        snapshot = {"deployments": {"cartservice": {"desired": 1, "ready": 0}}}
+        agent = LocalMonitorAgent(self.cfg, self.graph, None, {"p95_ms": 100})
+        agent.incident_services = {"cartservice"}
+        fix = agent._validated_fix(
+            {"fix": {"action": "scale", "service": "cartservice", "replicas": 2, "rationale": "availability"}},
+            snapshot,
+        )
+        self.assertEqual(fix["replicas"], 2)
+        agent.incident_services = {"redis-cart"}
+        stateful = agent._validated_fix(
+            {"fix": {"action": "scale", "service": "redis-cart", "replicas": 2}},
+            {"deployments": {"redis-cart": {"desired": 1, "ready": 0}}},
+        )
+        self.assertIsNone(stateful)
+
+
 if __name__ == "__main__":
     unittest.main()
