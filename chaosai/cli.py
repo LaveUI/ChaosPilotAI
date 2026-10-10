@@ -90,7 +90,8 @@ def _execute(cfg, sim, plan, compare_to=None):
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = os.path.join(cfg["runs_dir"], run_id)
     done, limits = runner.run_plan(plan, cfg, env, baseline, run_dir, os.path.join(cfg["runs_dir"], "STOP"))
-    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"], "baseline": baseline,
+    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"],
+               "llm_model": plan.get("llm_model"), "baseline": baseline,
                "limits": limits, "plan": plan, "experiments": done, "compare_to": compare_to}
     if not done:
         raise SystemExit("No experiments completed.")

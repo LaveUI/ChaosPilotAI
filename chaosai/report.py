@@ -40,13 +40,15 @@ def timeline_svg(samples, w=560, h=96):
 def render(results, graph, previous=None):
     e = html.escape
     score = results["resilience_score"]
+    llm_model = results.get("llm_model") or results.get("summary_model")
     prev_score = previous["resilience_score"] if previous else None
     prev_by = {(p["service"], p["action"]): p for p in previous["experiments"]} if previous else {}
 
     parts = [f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
              f"<title>Resilience report {e(results['run_id'])}</title><style>{CSS}</style></head><body><main>",
              "<h1>Resilience report</h1>",
-             f"<div class='muted'>Run {e(results['run_id'])} &middot; environment: {e(results['env'])} &middot; planner: {e(results['planner'])}</div>"]
+             f"<div class='muted'>Run {e(results['run_id'])} &middot; environment: {e(results['env'])} &middot; planner: {e(results['planner'])}"
+             + (f" &middot; Gemini model: {e(llm_model)}" if llm_model else "") + "</div>"]
 
     delta = ""
     if prev_score is not None:
@@ -56,7 +58,7 @@ def render(results, graph, previous=None):
                  f"<div><div><b>Resilience score</b> out of 100</div>{delta}"
                  f"<div class='muted'>Baseline: {results['baseline']['error_rate']:.1%} errors, p95 {results['baseline']['p95_ms']:.0f} ms</div></div></div>")
     if results.get("summary"):
-        parts.append(f"<div class='card'><b>Summary</b><p>{e(results['summary'])}</p></div>")
+        parts.append(f"<div class='card'><b>Gemini-generated summary</b><p>{e(results['summary'])}</p></div>")
 
     parts.append("<h2>Experiments, weakest first</h2><div class='scroll'><table><tr><th>Service</th><th>Fault</th><th>Score</th>"
                  "<th>Errors</th><th>p95</th><th>Recovery</th>" + ("<th>Before</th>" if previous else "") + "</tr>")
@@ -73,9 +75,11 @@ def render(results, graph, previous=None):
     parts.append("<h2>Details</h2>")
     for x in results["experiments"]:
         abort = f"<span class='pill abort'>aborted: {e(x['abort_reason'])}</span>" if x["aborted"] else ""
+        planner_source = x.get("planner", results["planner"])
+        rationale_label = "Gemini planner rationale" if planner_source == "llm" or planner_source == "agents (llm)" else "Planner rationale"
         parts.append(f"<div class='card'><div class='row'><b>{e(x['action'])} on {e(x['service'])}</b> {abort}"
                      f"<span style='color:{_color(x['score'])}'><b>{x['score']}</b>/100</span></div>"
-                     f"<p class='muted' style='margin:4px 0 8px'>Why this test: {e(x['rationale'])}</p>"
+                     f"<p class='muted' style='margin:4px 0 8px'><b>{rationale_label}:</b> {e(x['rationale'])}</p>"
                      f"{timeline_svg(x['samples'])}"
                      f"<div class='muted'>Penalties: errors -{x['breakdown']['errors']}, latency -{x['breakdown']['latency']}, "
                      f"recovery -{x['breakdown']['recovery']}, abort -{x['breakdown']['abort']}"
@@ -87,6 +91,7 @@ def render(results, graph, previous=None):
             parts.append("<div style='color:var(--good)'>No action needed.</div>")
         parts.append("</div>")
 
+    parts.append("<p class='muted'>Probe measurements, resilience scores, penalties, and fix recommendations are calculated by ChaosPilot; Gemini supplies planner rationales and, when available, the summary.</p>")
     parts.append("<h2>Dependency map</h2><div class='scroll'><table><tr><th>Service</th><th>Calls</th><th>Called by</th><th>Replicas</th></tr>")
     for n in graph["nodes"]:
         parts.append(f"<tr><td>{e(n['name'])}</td><td>{e(', '.join(n['depends_on']) or '-')}</td>"

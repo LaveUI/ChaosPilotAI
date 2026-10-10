@@ -80,6 +80,9 @@ python3 -m unittest discover -s tests
 ```
 Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
 The simulator is a toy model for development; its numbers are not real results.
+Open the newest `runs/*/report.html`. A pre-generated example is in `docs/sample-report.html`.
+Reports identify the Gemini model and label its planner rationale and optional run summary. Probe
+measurements, resilience scores, and fix recommendations are calculated by ChaosPilot.
 
 ### On a real cluster
 
@@ -115,7 +118,13 @@ python3 -m chaosai agent --rounds 3
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 python3 -m chaosai agent --rounds 3     # the header line now shows "planner (llm)"
+**Optional Gemini-powered planner** (otherwise a rule-based planner runs):
+```bash
+python3 -m pip install google-genai
+export GEMINI_API_KEY=your-gemini-api-key
+python3 -m chaosai plan --n 4
 ```
+The model defaults to `gemini-3.8-flash`; override it with `CHAOSAI_MODEL` if needed.
 
 ## Commands
 
@@ -200,6 +209,14 @@ sample/        Online Boutique manifest used when the upstream repo is not clone
 docs/          architecture page, dependency map, sample report
 ```
 
+<<<<<<< HEAD
+=======
+## Day-by-day
+
+- **Day 1 checkpoint:** `./setup.sh`, then `map`, `baseline`, one `run` with a low `max_error_rate` to show the kill switch firing. Minimum: running app, dependency map, one safe injection with a working kill switch.
+- **Day 2:** set `GEMINI_API_KEY`, `plan`, `run`, `fix`, `rerun`, and show the before/after report.
+
+>>>>>>> e4bea8b (connected llm to the agents/ updated report details)
 ## Troubleshooting
 
 - **Baseline shows errors:** the port-forward is not running, or pods are not ready (`kubectl get pods`).

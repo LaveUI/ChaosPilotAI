@@ -89,7 +89,8 @@ def plan(graph, cfg, history=None, n=3):
                        "already_tested": history, "count": n}
             picks = _validate_llm(llm.ask_json(cfg, SYSTEM, payload), graph, cfg, n)
             if picks:
-                return {"planner": "llm", "experiments": _finalize(picks, graph, cfg)}
+                return {"planner": "llm", "llm_model": llm.model_name(cfg),
+                        "experiments": _finalize(picks, graph, cfg)}
             print("LLM returned no valid experiments; using rule-based planner.")
         except Exception as exc:  # network, auth, parse errors: never block the run
             print(f"LLM planner failed ({exc.__class__.__name__}); using rule-based planner.")

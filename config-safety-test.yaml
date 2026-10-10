@@ -1,0 +1,36 @@
+# AI Chaos Engineering: configuration (every key is optional; defaults live in chaosai/config.py)
+namespace: default
+manifest_path: microservices-demo/release/kubernetes-manifests.yaml   # falls back to sample/ if missing
+
+# What the prober hits (needs `kubectl port-forward deployment/frontend 8080:8080`)
+target_urls:
+  - http://localhost:8080/
+  - http://localhost:8080/product/OLJCESPC7Z
+  - http://localhost:8080/cart
+
+baseline_seconds: 60
+experiment_duration_s: 15
+recovery_timeout_s: 120
+cooldown_s: 0
+
+# The ONLY actions the planner may choose from
+allowlist: [pod-failure, network-delay, cpu-stress]
+# Services that are never targeted
+exclude_services: [loadgenerator, frontend]
+
+safety:
+  max_error_rate: 0.05          # abort if rolling error rate exceeds this
+  p95_factor: 2.0              # abort if rolling p95 > baseline p95 x factor ...
+  min_p95_ms: 1000             # ... and at least this many ms
+  max_extra_unhealthy_pods: 1  # blast-radius limit (pods newly not-ready)
+  window: 10                   # rolling window size (probes)
+  min_samples: 5
+
+llm:
+  enabled: true                # needs ANTHROPIC_API_KEY; otherwise rule-based planner is used
+  model: claude-sonnet-5-5     # override with env CHAOSAI_MODEL
+
+# Manual corrections to the dependency map
+graph_overrides:
+  add_edges: []                # e.g. [["checkoutservice", "redis-cart"]]
+  remove_edges: []

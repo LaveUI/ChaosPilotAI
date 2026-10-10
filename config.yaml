@@ -27,8 +27,8 @@ safety:
   min_samples: 5
 
 llm:
-  enabled: true                # needs ANTHROPIC_API_KEY; otherwise rule-based planner is used
-  model: claude-sonnet-5-5     # override with env CHAOSAI_MODEL
+  enabled: true                # needs GEMINI_API_KEY; otherwise rule-based planner is used
+  model: gemini-3.8-flash      # override with env CHAOSAI_MODEL
 
 # Manual corrections to the dependency map
 graph_overrides:
