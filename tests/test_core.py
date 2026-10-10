@@ -129,6 +129,33 @@ class PlannerTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    @staticmethod
+    def minimal_results(**overrides):
+        results = {
+            "run_id": "test-run",
+            "env": "simulated",
+            "planner": "rule-based",
+            "resilience_score": 72.5,
+            "baseline": {"error_rate": 0.0, "p50_ms": 10, "p95_ms": 20, "samples": 5},
+            "experiments": [{
+                "id": "exp1",
+                "service": "cartservice",
+                "action": "pod-failure",
+                "duration_s": 30,
+                "score": 72.5,
+                "error_rate": 0.2,
+                "p95_ms": 30,
+                "recovered": True,
+                "recovery_s": 2,
+                "aborted": False,
+                "rationale": "Test a pod outage.",
+                "samples": [],
+                "recommendations": [],
+            }],
+        }
+        results.update(overrides)
+        return results
+
     def test_report_labels_gemini_content_and_code_calculated_results(self):
         results = {
             "run_id": "test-run",
@@ -159,10 +186,59 @@ class ReportTests(unittest.TestCase):
 
         rendered = report.render(results, {"nodes": []})
 
-        self.assertIn("Gemini model: gemini-test", rendered)
-        self.assertIn("Gemini-generated summary", rendered)
-        self.assertIn("Gemini planner rationale", rendered)
-        self.assertIn("Probe measurements, resilience scores", rendered)
+        self.assertIn("gemini-test", rendered)
+        self.assertIn("Recorded run summary", rendered)
+        self.assertIn("Recorded planner rationale", rendered)
+        self.assertIn("Score model", rendered)
+
+    def test_missing_summary_and_previous_run_are_explicit(self):
+        rendered = report.render(self.minimal_results(), {"nodes": []})
+
+        self.assertIn("Evidence-based summary", rendered)
+        self.assertIn("no analyst or reporter summary was saved", rendered)
+        self.assertIn("Verification pending", rendered)
+        self.assertIn("cannot verify remediation", rendered)
+
+    def test_comparison_does_not_claim_a_fix_was_verified(self):
+        current = self.minimal_results()
+        previous = self.minimal_results(
+            run_id="previous-run",
+            resilience_score=50,
+            experiments=[dict(current["experiments"][0], score=50)],
+        )
+
+        rendered = report.render(current, {"nodes": []}, previous)
+
+        self.assertIn("Previous score", rendered)
+        self.assertIn("50.0", rendered)
+        self.assertIn("not proof that a remediation was applied or caused", rendered)
+
+    def test_failed_probe_fallback_latency_is_excluded(self):
+        experiment = {
+            "phase_metrics": {
+                "before": {"samples": 1, "successful_requests": 1, "p95_ms": 10, "error_rate": 0},
+                "during": {"samples": 1, "successful_requests": 0, "p95_ms": 0, "error_rate": 1},
+            },
+            "phase_samples": {
+                "before": [[0, 1, 10]],
+                "during": [[1, 0, 999999]],
+            },
+        }
+
+        impact = report._observed_impact(experiment, {"p95_ms": 10, "error_rate": 0})
+
+        self.assertEqual(impact["max_latency_ms"], 10)
+        self.assertTrue(impact["all_failed"])
+
+    def test_missing_phase_data_and_untrusted_text_render_safely(self):
+        results = self.minimal_results()
+        results["experiments"][0]["service"] = "<script>alert(1)</script>"
+        rendered = report.render(results, {"nodes": []})
+
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("Timeline data unavailable", rendered)
+        self.assertIn("N/A", rendered)
 
 
 class SimulatedRunTests(unittest.TestCase):

@@ -1,0 +1,7 @@
+LLM planner failed (GoogleAPIError): 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}
+Agents (llm): observer, planner, injector, analyst, reporter. Orchestrator: LangGraph state graph.
+Safety limits: {'max_error_rate': 0.5, 'p95_limit_ms': 1500, 'max_extra_unhealthy_pods': 3}
+
+=== Round 1 of 3 ===
+  [Observer agent] LLM observation failed (JSONDecodeError); using the rules.
+  [Observer agent] (rule-based) healthy: 3 of 3 probes succeeded; 12 of 12 deployments ready; 5 recent warning event(s).
