@@ -209,14 +209,11 @@ sample/        Online Boutique manifest used when the upstream repo is not clone
 docs/          architecture page, dependency map, sample report
 ```
 
-<<<<<<< HEAD
-=======
 ## Day-by-day
 
 - **Day 1 checkpoint:** `./setup.sh`, then `map`, `baseline`, one `run` with a low `max_error_rate` to show the kill switch firing. Minimum: running app, dependency map, one safe injection with a working kill switch.
 - **Day 2:** set `GEMINI_API_KEY`, `plan`, `run`, `fix`, `rerun`, and show the before/after report.
 
->>>>>>> e4bea8b (connected llm to the agents/ updated report details)
 ## Troubleshooting
 
 - **Baseline shows errors:** the port-forward is not running, or pods are not ready (`kubectl get pods`).
