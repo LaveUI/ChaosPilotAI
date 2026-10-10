@@ -76,10 +76,26 @@ so the Planner targets them first. To regenerate: `python3 -m chaosai map` write
 
 ```bash
 pip install -r requirements.txt
+cd ~/Documents/bosch/ChaosPilotAI
+source .venv/bin/activate
 python3 -m unittest discover -s tests
-python3 -m chaosai --sim map
-python3 -m chaosai --sim baseline
-python3 -m chaosai --sim agent --rounds 3
+# Build the service dependency map
+python -m chaosai map
+
+# Measure the healthy baseline; keep your frontend port-forward running
+python -m chaosai baseline
+
+# Create a three-experiment plan
+python -m chaosai plan --n 3 --planner rule-based
+
+# Review the plan before injecting faults
+cat plan.json
+
+# Run the experiments and generate the report
+python -m chaosai run --plan plan.json
+
+# Open/regenerate the latest report
+python -m chaosai report
 ```
 Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
 The simulator is a toy model for development; its numbers are not real results.
