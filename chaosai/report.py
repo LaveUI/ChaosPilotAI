@@ -403,6 +403,95 @@ def experiment_conclusion(experiment, baseline):
 
 
 
+
+SEVERITY_COLOR = {"critical": "var(--red)", "high": "var(--red)", "medium": "var(--amber)",
+                  "low": "var(--blue)", "none": "var(--green)"}
+
+
+def agents_line(results):
+    """One line saying which agents ran and whether each used the LLM."""
+    agents = results.get("agents")
+    if not agents:
+        return ""
+    order = ("observer", "planner", "injector", "analyst", "reporter")
+    text = " &middot; ".join(f"{name}: {html.escape(str(agents[name]))}" for name in order if name in agents)
+    orch = results.get("orchestrator")
+    orch = f" &middot; orchestrated by: {html.escape(str(orch))}" if orch else ""
+    return f"<div class='muted'>Agents &mdash; {text}{orch}</div>"
+
+
+def score_bars(experiments):
+    """Horizontal bar per experiment score (0-100), labelled with service, fault and value."""
+    if not experiments:
+        return ""
+    rows = []
+    for x in sorted(experiments, key=lambda x: x.get("score", 0)):
+        score = float(x.get("score", 0) or 0)
+        label = html.escape(f"{x.get('service')} · {x.get('action')}")
+        rows.append(
+            "<div style='display:grid;grid-template-columns:minmax(150px,34%) 1fr 52px;gap:10px;"
+            "align-items:center;margin:7px 0'>"
+            f"<div style='font-size:13px;overflow-wrap:anywhere'>{label}</div>"
+            "<div style='background:var(--line);border-radius:6px;height:14px' role='img' "
+            f"aria-label='{label}: score {score:.1f} out of 100'>"
+            f"<div style='width:{max(1.0, min(100.0, score)):.1f}%;height:14px;border-radius:6px;"
+            f"background:{_color(score)}'></div></div>"
+            f"<div style='text-align:right;font-variant-numeric:tabular-nums'><b>{score:.1f}</b></div></div>"
+        )
+    return ("<h2>Score per experiment</h2><div class='card'>" + "".join(rows)
+            + "<div class='muted' style='font-size:12px;margin-top:6px'>Scale 0 to 100. Higher is more resilient.</div></div>")
+
+
+def severity_section(results):
+    """Weaknesses ranked by severity, from the reporter agent."""
+    rep = results.get("ai_report")
+    if not rep:
+        return ""
+    who = "Gemini reporter agent" if rep.get("source") == "llm" else "Reporter agent (rule-based)"
+    out = [f"<h2>Weaknesses ranked by severity</h2><div class='muted'>Ranked by: {who}</div>"]
+    ranked = rep.get("ranked_weaknesses") or []
+    if ranked:
+        out.append("<div class='scroll'><table><tr><th>#</th><th>Severity</th><th>Service</th><th>Fault</th>"
+                   "<th>Score</th><th>Why</th></tr>")
+        for i, w in enumerate(ranked, 1):
+            sev = str(w.get("severity") or "low")
+            out.append(
+                f"<tr><td>{i}</td>"
+                f"<td><b style='color:{SEVERITY_COLOR.get(sev, 'var(--muted)')}'>{html.escape(sev)}</b></td>"
+                f"<td>{html.escape(str(w.get('service')))}</td><td>{html.escape(str(w.get('action')))}</td>"
+                f"<td>{html.escape(str(w.get('score')))}</td><td>{html.escape(str(w.get('why', '')))}</td></tr>"
+            )
+        out.append("</table></div>")
+    else:
+        out.append("<p style='color:var(--green)'>No weaknesses found in this session.</p>")
+    if rep.get("score_explanation"):
+        out.append(f"<p class='muted'><b>About the score:</b> {html.escape(str(rep['score_explanation']))}</p>")
+    return "".join(out)
+
+
+def round_context(x):
+    """What the observer saw and how the planner ranked the candidates for this experiment."""
+    out = []
+    obs = x.get("observation")
+    if obs:
+        who = "Gemini observer agent" if obs.get("source") == "llm" else "Observer agent"
+        state = "healthy" if obs.get("healthy") else "not healthy"
+        out.append(f"<p class='muted' style='margin:4px 0'><b>{who}:</b> app {state} before the experiment. "
+                   f"{html.escape(str(obs.get('summary', '')))}</p>")
+    ranked = x.get("ranked_candidates") or []
+    if ranked:
+        rows = "".join(
+            f"<tr><td>{r.get('rank')}</td><td>{html.escape(str(r.get('service')))}</td>"
+            f"<td>{html.escape(str(r.get('action')))}</td>"
+            f"<td>{'<b>chosen</b>' if r.get('chosen') else ('already tested' if r.get('already_tested') else '')}</td>"
+            f"<td>{html.escape(str(r.get('rationale', '')))}</td></tr>"
+            for r in ranked)
+        out.append("<details style='margin:6px 0'><summary>Planner's ranked candidates for this round "
+                   f"({len(ranked)})</summary><div class='scroll'><table><tr><th>Rank</th><th>Service</th>"
+                   f"<th>Fault</th><th></th><th>Reason</th></tr>{rows}</table></div></details>")
+    return "".join(out)
+
+
 def render(results, graph, previous=None):
     e = html.escape
     score = results["resilience_score"]
@@ -469,6 +558,10 @@ def render(results, graph, previous=None):
             f"<p>{e(results['summary'])}</p>"
             f"</div>"
         )
+
+    parts.append(agents_line(results))
+    parts.append(severity_section(results))
+    parts.append(score_bars(results.get("experiments") or []))
 
     # ---------------------------------------
     # Experiments overview table
@@ -543,6 +636,12 @@ def render(results, graph, previous=None):
             f"</span>"
             if x.get("aborted") else ""
         )
+        if x.get("agent_rollback"):
+            abort += (
+                f"<span class='pill abort'>"
+                f"rolled back by the injector agent: {e(str(x['agent_rollback']))}"
+                f"</span>"
+            )
 
         parts.append(
             f"<div class='card'>"
@@ -555,6 +654,7 @@ def render(results, graph, previous=None):
             f"</span>"
             f"</div>"
 
+            f"{round_context(x)}"
             f"<p class='muted' "
             f"style='margin:4px 0 8px'>"
             f"<b>{rationale_label}:</b> "
@@ -601,9 +701,22 @@ def render(results, graph, previous=None):
         # Recommended fixes
         # -----------------------------------
 
+        if x.get("injector_reason"):
+            who = "Gemini injector agent" if x.get("injector") == "llm" else "Injector agent"
+            parts.append(
+                f"<p class='muted'><b>{who}:</b> injected for {e(str(x.get('duration_s')))}s. "
+                f"{e(str(x['injector_reason']))}</p>"
+            )
+        if x.get("ai_diagnosis"):
+            sev = f" (severity: {e(str(x['ai_severity']))})" if x.get("ai_severity") else ""
+            parts.append(
+                f"<p><b>Gemini analyst agent diagnosis{sev}:</b> {e(str(x['ai_diagnosis']))}</p>"
+            )
+        fixes_label = ("Recommended fixes (Gemini analyst agent)" if x.get("analyst") == "llm"
+                       else "Recommended fixes")
         if x.get("recommendations"):
             parts.append(
-                "<b>Recommended fixes</b><ul>"
+                f"<b>{fixes_label}</b><ul>"
                 + "".join(
                     f"<li>"
                     f"<b>{e(str(r.get('title', 'Recommendation')))}</b>. "
@@ -638,11 +751,21 @@ def render(results, graph, previous=None):
         "</tr>"
     )
 
-    parts.append(
-        "<p class='muted'>Probe measurements, resilience scores, penalties, and fix "
-        "recommendations are calculated by ChaosPilot; Gemini supplies planner "
-        "rationales and, when available, the summary.</p>"
-    )
+    ai_fixes = any(x.get("analyst") == "llm" for x in results["experiments"])
+    if llm_model:
+        parts.append(
+            "<p class='muted'>Probe measurements, resilience scores and penalties are calculated by ChaosPilot. "
+            + ("Gemini agents observed the app, ranked and chose the experiments, decided the injection and "
+               "rollback, and wrote the diagnoses, fixes and severity ranking; "
+               "every choice was validated in code against the allowlist and safety limits.</p>" if ai_fixes else
+               "Gemini supplies planner rationales and, when available, the summary; "
+               "fix recommendations are rule-based.</p>")
+        )
+    else:
+        parts.append(
+            "<p class='muted'>This run used the rule-based agents (no LLM). Probe measurements, resilience "
+            "scores, penalties and fix recommendations are calculated by ChaosPilot.</p>"
+        )
     for n in graph["nodes"]:
         parts.append(
             f"<tr>"

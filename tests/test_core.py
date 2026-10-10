@@ -191,5 +191,152 @@ class SimulatedRunTests(unittest.TestCase):
         self.assertEqual(len(ids), 10)
 
 
+class LlmAgentLoopTests(unittest.TestCase):
+    """All five agents in LLM mode, with the model replaced by a scripted fake."""
+
+    def run_loop(self, fake, rounds=2):
+        from unittest import mock
+        from chaosai import agents, llm
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = cfg_in(tmp)
+            g = mapper.build_graph(MANIFEST)
+            env = SimEnv(cfg, g)
+            base = runner.measure_baseline(cfg, env, 30)
+            with mock.patch.object(llm, "available", return_value=True), \
+                 mock.patch.object(llm, "ask_json", side_effect=fake), \
+                 mock.patch.object(llm, "model_name", return_value="fake-model"):
+                res = agents.run_agents(cfg, env, g, base, rounds, "t", os.path.join(tmp, "run"),
+                                        os.path.join(tmp, "STOP"), planner_mode="llm")
+                if res["experiments"]:
+                    report.render(res, g, None)      # the report must render with the agent fields
+                return res
+
+    @staticmethod
+    def scripted(picks, inject=True, duration=30, rollback=False, overrides=None):
+        """Fake model. `picks` is one ranked list of (service, action) per planner call."""
+        picks = [list(p) for p in picks]
+        overrides = overrides or {}
+
+        def fake(cfg, system, payload, max_tokens=1500):
+            for key, answer in overrides.items():
+                if key in system:
+                    return answer
+            if "observer agent" in system:
+                return {"healthy": True, "summary": "All deployments are ready.", "concerns": []}
+            if "planner agent" in system:
+                ranked = picks.pop(0)
+                return {"experiments": [{"service": s, "action": a, "rationale": "llm reason"} for s, a in ranked]}
+            if "A fault you injected is" in system:
+                return {"rollback": rollback, "reason": "impact is already clear"}
+            if "injection agent" in system:
+                return {"inject": inject, "duration_s": duration, "reason": "app is healthy"}
+            if "analyst agent" in system:
+                return {"diagnosis": "The service failed under the fault.", "severity": "high",
+                        "fixes": [{"title": "Add a timeout", "detail": "Bound the wait."}]}
+            if "reporting agent" in system:
+                return {"overall": "Overall findings.", "score_explanation": "Mean of the scores.",
+                        "ranked_weaknesses": [{"service": e["service"], "action": e["action"],
+                                               "severity": "high", "why": "It broke."}
+                                              for e in payload["experiments"]]
+                        + [{"service": "made-up", "action": "pod-failure", "severity": "critical", "why": "x"}]}
+            raise AssertionError("unexpected prompt: " + system[:60])
+        return fake
+
+    def test_all_five_agents_use_the_llm(self):
+        res = self.run_loop(self.scripted([[("productcatalogservice", "network-delay"), ("adservice", "cpu-stress")],
+                                           [("shippingservice", "cpu-stress")]]))
+        self.assertEqual(res["agents"], {"observer": "llm", "planner": "llm", "injector": "llm",
+                                         "analyst": "llm", "reporter": "llm"})
+        first = res["experiments"][0]
+        self.assertEqual(first["duration_s"], 30)
+        self.assertEqual(first["observation"]["summary"], "All deployments are ready.")
+        self.assertEqual(first["ai_diagnosis"], "The service failed under the fault.")
+        self.assertEqual(first["recommendations"][0], {"title": "Add a timeout", "detail": "Bound the wait.",
+                                                       "source": "llm"})
+        self.assertIn("score", first)          # the score still comes from the fixed formula
+        self.assertEqual(res["summary"], "Overall findings.")
+
+    def test_planner_ranks_candidates_and_skips_tested_ones(self):
+        same = [("productcatalogservice", "network-delay"), ("adservice", "cpu-stress")]
+        res = self.run_loop(self.scripted([same, same]))
+        ran = [(e["service"], e["action"]) for e in res["experiments"]]
+        self.assertEqual(ran, same)             # round 2 moves to the second-ranked candidate
+        ranked = res["experiments"][1]["ranked_candidates"]
+        self.assertEqual([r["rank"] for r in ranked], [1, 2])
+        self.assertTrue(ranked[0]["already_tested"])
+        self.assertTrue(ranked[1]["chosen"])
+
+    def test_reporter_ranking_only_contains_real_experiments(self):
+        res = self.run_loop(self.scripted([[("productcatalogservice", "pod-failure")]]), rounds=1)
+        ranked = res["ai_report"]["ranked_weaknesses"]
+        self.assertEqual([(w["service"], w["action"]) for w in ranked], [("productcatalogservice", "pod-failure")])
+
+    def test_injector_duration_is_clamped_to_the_limits(self):
+        res = self.run_loop(self.scripted([[("shippingservice", "cpu-stress")]], duration=99999), rounds=1)
+        self.assertEqual(res["experiments"][0]["duration_s"], 60)
+        res = self.run_loop(self.scripted([[("shippingservice", "cpu-stress")]], duration=1), rounds=1)
+        self.assertEqual(res["experiments"][0]["duration_s"], 15)
+
+    def test_injector_can_decline_and_nothing_is_injected(self):
+        res = self.run_loop(self.scripted([[("shippingservice", "cpu-stress")],
+                                           [("currencyservice", "cpu-stress")]], inject=False))
+        self.assertEqual(res["experiments"], [])
+        self.assertEqual([r["outcome"] for r in res["rounds"]], ["declined", "declined"])
+
+    def test_injector_can_roll_back_early(self):
+        res = self.run_loop(self.scripted([[("shippingservice", "cpu-stress")]], duration=60, rollback=True),
+                            rounds=1)
+        exp = res["experiments"][0]
+        self.assertEqual(exp["agent_rollback"], "impact is already clear")
+        self.assertFalse(exp["aborted"])        # an agent rollback is not a safety abort
+        self.assertLess(len(exp["phase_samples"]["during"]), 60)
+        self.assertTrue(exp["cleanup_confirmed"])
+
+    def test_safety_guard_still_aborts_when_the_agent_says_continue(self):
+        res = self.run_loop(self.scripted([[("redis-cart", "pod-failure")]], rollback=False), rounds=1)
+        self.assertTrue(res["experiments"][0]["aborted"])
+
+    def test_llm_cannot_target_a_protected_service(self):
+        with self.assertRaises(RuntimeError):
+            self.run_loop(self.scripted([[("frontend", "pod-failure")]]), rounds=1)
+
+    def test_bad_answers_fall_back_to_rules(self):
+        bad = {"observer agent": {"x": 1}, "analyst agent": {"nonsense": True}, "reporting agent": {"y": 2}}
+        res = self.run_loop(self.scripted([[("productcatalogservice", "pod-failure")]], overrides=bad), rounds=1)
+        self.assertEqual(res["agents"]["observer"], "rule-based")
+        self.assertEqual(res["agents"]["analyst"], "rule-based")
+        self.assertEqual(res["agents"]["reporter"], "rule-based")
+        self.assertTrue(res["experiments"][0]["recommendations"])
+        self.assertTrue(res["ai_report"]["ranked_weaknesses"])
+
+    def test_planner_failure_after_the_first_round_keeps_the_session(self):
+        res = self.run_loop(self.scripted([[("shippingservice", "cpu-stress")], []]), rounds=2)
+        self.assertEqual(len(res["experiments"]), 2)
+        self.assertEqual(res["experiments"][1]["planner"], "rule-based")
+
+
+class ObserverTests(unittest.TestCase):
+    def test_simulated_diagnostics_show_the_failed_pod(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = cfg_in(tmp)
+            env = SimEnv(cfg, mapper.build_graph(MANIFEST))
+            self.assertEqual(env.cluster_diagnostics()["unhealthy_pods"], [])
+            env.apply({"service": "redis-cart", "action": "pod-failure"}, None)
+            diag = env.cluster_diagnostics()
+            self.assertEqual(diag["deployments"]["redis-cart"]["ready"], 0)
+            self.assertEqual(diag["unhealthy_pods"][0]["app"], "redis-cart")
+
+    def test_rule_based_observer_flags_an_unready_deployment(self):
+        from chaosai import agents
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = cfg_in(tmp)
+            g = mapper.build_graph(MANIFEST)
+            env = SimEnv(cfg, g)
+            env.apply({"service": "adservice", "action": "pod-failure"}, None)
+            obs = agents.ObserverAgent(cfg, env, g).observe()
+            self.assertFalse(obs["healthy"])
+            self.assertEqual(obs["concerns"], ["adservice"])
+
+
 if __name__ == "__main__":
     unittest.main()

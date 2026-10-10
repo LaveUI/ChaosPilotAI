@@ -1,4 +1,3 @@
-
 """ChaosPilot AI: four-phase chaos experiment runner."""
 
 import os
@@ -108,8 +107,12 @@ def latency_change_pct(before, other):
     return round((other - before) / before * 100, 2)
 
 
-def run_experiment(exp, cfg, env, baseline, guard, run_dir):
-    """Run Before -> During -> Recovery -> After."""
+def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
+    """Run Before -> During -> Recovery -> After.
+
+    on_sample: optional callback, called about every `agent_review_every_samples` probes while the
+    fault is active with the current readings. If it returns a reason string, the fault is rolled
+    back early (an agent decision). The safety guard is always checked first and cannot be skipped."""
 
     path = chaos.write_manifest(exp, cfg, run_dir)
 
@@ -193,6 +196,8 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir):
     reason = None
     abort_latency = None
     cleanup_confirmed = False
+    agent_rollback = None
+    review_every = max(1, int(cfg.get("agent_review_every_samples", 15)))
 
     injected_at = env.now() - origin
     fault_started = env.now()
@@ -240,6 +245,20 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir):
                     aborted = True
                     print(f"  SAFETY ABORT: {reason}")
                     break
+
+                if on_sample and i % review_every == 0:
+                    agent_rollback = on_sample({
+                        "elapsed_s": round(env.now() - fault_started, 1),
+                        "planned_duration_s": exp["duration_s"],
+                        "error_rate": round(err, 3),
+                        "p95_ms": round(latency),
+                        "extra_unhealthy_pods": extra,
+                        "samples": len(phase_samples["during"]),
+                    })
+                    if agent_rollback:
+                        agent_rollback = str(agent_rollback)[:400]
+                        print(f"  AGENT ROLLBACK: {agent_rollback}")
+                        break
 
             env.sleep(interval)
 
@@ -437,6 +456,7 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir):
         "impact": impact,
         "events": events,
         "cleanup_confirmed": cleanup_confirmed,
+        "agent_rollback": agent_rollback,
     }
 
 

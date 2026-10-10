@@ -101,7 +101,7 @@ def _execute(cfg, sim, plan, compare_to=None):
     analyzer.analyze(results, graph, baseline, cfg)
     _save(os.path.join(run_dir, "results.json"), results)
     previous = _load(_results_path(cfg, compare_to), "") if compare_to else None
-    with open(os.path.join(run_dir, "report.html"), "w") as f:
+    with open(os.path.join(run_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(report.render(results, graph, previous))
     with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w") as f:
         f.write(run_id)
@@ -153,7 +153,7 @@ def cmd_report(a, cfg):
     results = _load(_results_path(cfg, run_id), "")
     prev = _load(_results_path(cfg, results["compare_to"]), "") if results.get("compare_to") else None
     out = os.path.join(cfg["runs_dir"], run_id, "report.html")
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         f.write(report.render(results, _graph(cfg), prev))
     print(f"Wrote {out}")
 
@@ -171,7 +171,7 @@ def cmd_agent(a, cfg):
     if not results["experiments"]:
         raise SystemExit("No experiments completed.")
     _save(os.path.join(run_dir, "results.json"), results)
-    with open(os.path.join(run_dir, "report.html"), "w") as f:
+    with open(os.path.join(run_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(report.render(results, graph, None))
     with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w") as f:
         f.write(run_id)
