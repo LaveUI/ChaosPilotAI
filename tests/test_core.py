@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -8,8 +10,8 @@ from unittest.mock import patch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from chaosai import analyzer, chaos, config, mapper, planner, report, runner  # noqa: E402
-from chaosai.env import SimEnv  # noqa: E402
+from chaosai import analyzer, chaos, config, local_agent, mapper, planner, report, runner  # noqa: E402
+from chaosai.env import KubeEnv, SimEnv  # noqa: E402
 from chaosai.guard import Guard  # noqa: E402
 
 MANIFEST = os.path.join(ROOT, "sample", "kubernetes-manifests.yaml")
@@ -162,6 +164,183 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Gemini-generated summary", rendered)
         self.assertIn("Gemini planner rationale", rendered)
         self.assertIn("Probe measurements, resilience scores", rendered)
+
+
+class LocalAgentTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config.load(None)
+        self.graph = mapper.build_graph(MANIFEST)
+        self.snapshot = {
+            "deployments": {"cartservice": {"desired": 1, "ready": 0, "available": 0}},
+            "unhealthy_pods": [{"name": "cartservice-abc", "app": "cartservice", "phase": "Running", "ready": False}],
+            "warning_events": [],
+        }
+
+    def test_ollama_endpoint_must_be_loopback(self):
+        self.assertEqual(
+            local_agent._loopback_ollama_endpoint("http://localhost:11434"),
+            "http://localhost:11434/api/chat",
+        )
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            local_agent._loopback_ollama_endpoint("http://example.com:11434")
+
+    def test_kubernetes_diagnostics_collect_workload_events_and_failed_pod_logs(self):
+        payloads = {
+            "deployments": {"items": [{
+                "metadata": {"name": "cartservice"},
+                "spec": {"replicas": 2},
+                "status": {"readyReplicas": 1, "availableReplicas": 1},
+            }]},
+            "pods": {"items": [{
+                "metadata": {"name": "cartservice-abc", "labels": {"app": "cartservice"}},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": [{
+                        "name": "cart",
+                        "ready": False,
+                        "restartCount": 2,
+                        "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "restarting"}},
+                    }],
+                },
+            }]},
+            "events": {"items": [{
+                "lastTimestamp": "2026-10-10T10:00:00Z",
+                "reason": "BackOff",
+                "message": "Container restarting",
+                "involvedObject": {"kind": "Pod", "name": "cartservice-abc"},
+            }]},
+        }
+
+        def fake_kubectl(*args, **_kwargs):
+            if args[0] == "logs":
+                return subprocess.CompletedProcess(args, 0, "recent failure log", "")
+            resource = args[1]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payloads[resource]), "")
+
+        env = KubeEnv(self.cfg)
+        with patch("chaosai.env._kubectl", side_effect=fake_kubectl):
+            snapshot = env.cluster_diagnostics()
+
+        self.assertEqual(snapshot["deployments"]["cartservice"]["ready"], 1)
+        self.assertEqual(snapshot["unhealthy_pods"][0]["container_states"][0]["waiting_reason"], "CrashLoopBackOff")
+        self.assertEqual(snapshot["unhealthy_pods"][0]["recent_logs"], "recent failure log")
+        self.assertEqual(snapshot["warning_events"][0]["reason"], "BackOff")
+
+    def test_probe_alert_waits_for_minimum_samples(self):
+        stats, reasons = local_agent.incident_metrics(
+            [(False, 40)], {"p95_ms": 100}, self.cfg
+        )
+        self.assertEqual(stats["error_rate"], 1.0)
+        self.assertEqual(reasons, [])
+        _stats, reasons = local_agent.incident_metrics(
+            [(False, 40)] * self.cfg["local_agent"]["min_samples"],
+            {"p95_ms": 100},
+            self.cfg,
+        )
+        self.assertTrue(any("probe error rate" in reason for reason in reasons))
+
+    def test_scale_recommendation_is_limited_to_affected_stateless_deployment(self):
+        raw = {
+            "diagnosis": "Cart service is unavailable.",
+            "likely_cause": "Its pod is not ready.",
+            "confidence": 0.8,
+            "fix": {
+                "action": "scale", "service": "cartservice", "replicas": 2,
+                "rationale": "Add temporary capacity while the pod recovers.",
+            },
+        }
+        result = local_agent.validate_diagnosis(
+            raw, self.graph, self.snapshot, self.cfg, {"cartservice"}
+        )
+        self.assertEqual(result["fix"]["replicas"], 2)
+
+        raw["fix"]["service"] = "redis-cart"
+        result = local_agent.validate_diagnosis(
+            raw, self.graph, self.snapshot, self.cfg, {"cartservice", "redis-cart"}
+        )
+        self.assertIsNone(result["fix"])
+        self.assertIn("not offered", result["fix_rationale"])
+
+        raw["fix"]["service"] = ["cartservice"]
+        result = local_agent.validate_diagnosis(
+            raw, self.graph, self.snapshot, self.cfg, {"cartservice"}
+        )
+        self.assertIsNone(result["fix"])
+
+    def test_incident_requires_human_approval_and_is_saved(self):
+        class FakeEnv:
+            def probe(self):
+                return False, 50
+
+            def cluster_diagnostics(self):
+                return {
+                    **self_snapshot,
+                    "warning_events": [],
+                }
+
+            def scale(self, service, replicas):
+                raise AssertionError("declined fixes must not be applied")
+
+        self_snapshot = self.snapshot
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cfg["runs_dir"] = tmp
+            raw = {
+                "diagnosis": "A deployment is not ready.",
+                "likely_cause": "The pod is failing readiness checks.",
+                "confidence": 0.7,
+                "fix": {"action": "none", "service": "", "replicas": 0, "rationale": "Need more evidence."},
+            }
+            agent = local_agent.LocalMonitorAgent(
+                self.cfg, self.graph, FakeEnv(), {"p95_ms": 100},
+                input_fn=lambda _prompt: "no",
+                diagnose_fn=lambda _cfg, _context: raw,
+            )
+            with patch("builtins.print"):
+                agent.poll()
+            path = os.path.join(tmp, "monitor", "incidents.jsonl")
+            with open(path) as incident_file:
+                record = json.loads(incident_file.readline())
+            self.assertFalse(record["approved"])
+            self.assertFalse(record["applied"])
+
+    def test_approved_scale_is_applied_and_recorded(self):
+        class FakeEnv:
+            scaled = []
+
+            def probe(self):
+                return False, 50
+
+            def cluster_diagnostics(self):
+                return self_snapshot
+
+            def scale(self, service, replicas):
+                self.scaled.append((service, replicas))
+
+        self_snapshot = self.snapshot
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cfg["runs_dir"] = tmp
+            env = FakeEnv()
+            raw = {
+                "diagnosis": "The cart deployment has no ready pod.",
+                "likely_cause": "Its single replica is unavailable.",
+                "confidence": 0.8,
+                "fix": {
+                    "action": "scale", "service": "cartservice", "replicas": 2,
+                    "rationale": "A second replica can preserve availability.",
+                },
+            }
+            agent = local_agent.LocalMonitorAgent(
+                self.cfg, self.graph, env, {"p95_ms": 100},
+                input_fn=lambda _prompt: "yes",
+                diagnose_fn=lambda _cfg, _context: raw,
+            )
+            with patch("builtins.print"):
+                agent.poll()
+            with open(os.path.join(tmp, "monitor", "incidents.jsonl")) as incident_file:
+                record = json.loads(incident_file.readline())
+            self.assertEqual(env.scaled, [("cartservice", 2)])
+            self.assertTrue(record["approved"])
+            self.assertTrue(record["applied"])
 
 
 class SimulatedRunTests(unittest.TestCase):

@@ -188,6 +188,20 @@ def cmd_kill(a, cfg):
     print(make_env(cfg, graph, a.sim).delete_all_chaos().strip() or "No chaosai experiments were active.")
 
 
+def cmd_monitor(a, cfg):
+    if a.sim:
+        raise SystemExit("The local monitor observes a live Kubernetes cluster; remove --sim.")
+    from .local_agent import LocalMonitorAgent
+
+    graph, baseline = _graph(cfg), _baseline(cfg)
+    env = make_env(cfg, graph, sim=False)
+    monitor = LocalMonitorAgent(cfg, graph, env, baseline)
+    try:
+        monitor.run()
+    except KeyboardInterrupt:
+        print("\nLocal monitor stopped.")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="chaosai", description="AI-driven chaos engineering")
     p.add_argument("--config", default="config.yaml")
@@ -212,8 +226,10 @@ def main(argv=None):
     ag.add_argument("--rounds", type=int, default=3)
     ag.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
+    mo = sub.add_parser("monitor", help="continuously observe app health and diagnose incidents with local Ollama")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,
-     "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "kill": cmd_kill}[a.cmd](a, cfg)
+     "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "monitor": cmd_monitor,
+     "kill": cmd_kill}[a.cmd](a, cfg)

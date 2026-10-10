@@ -65,9 +65,101 @@ class KubeEnv:
                 bad += 1
         return bad
 
+    def cluster_diagnostics(self):
+        deployments_result = _kubectl("get", "deployments", "-n", self.ns, "-o", "json")
+        pods_result = _kubectl("get", "pods", "-n", self.ns, "-o", "json")
+        events_result = _kubectl(
+            "get", "events", "-n", self.ns, "--field-selector", "type=Warning", "-o", "json"
+        )
+        deployments = json.loads(deployments_result.stdout).get("items", [])
+        pod_items = json.loads(pods_result.stdout).get("items", [])
+        event_items = json.loads(events_result.stdout).get("items", [])
+
+        deployment_data = {}
+        for deployment in deployments:
+            name = deployment["metadata"]["name"]
+            status = deployment.get("status", {})
+            spec = deployment.get("spec", {})
+            deployment_data[name] = {
+                "desired": spec.get("replicas", 1),
+                "ready": status.get("readyReplicas", 0),
+                "available": status.get("availableReplicas", 0),
+            }
+
+        pod_data = []
+        unhealthy_pods = []
+        for pod in pod_items:
+            metadata = pod.get("metadata", {})
+            status = pod.get("status", {})
+            container_statuses = status.get("containerStatuses") or []
+            ready = (
+                status.get("phase") == "Running"
+                and bool(container_statuses)
+                and all(container.get("ready") for container in container_statuses)
+            )
+            item = {
+                "name": metadata.get("name", ""),
+                "app": (metadata.get("labels") or {}).get("app", ""),
+                "phase": status.get("phase", "Unknown"),
+                "ready": ready,
+                "restarts": sum(container.get("restartCount", 0) for container in container_statuses),
+                "container_states": [],
+            }
+            for container in container_statuses:
+                state = container.get("state") or {}
+                last_state = container.get("lastState") or {}
+                waiting = state.get("waiting") or {}
+                terminated = last_state.get("terminated") or {}
+                if waiting.get("reason") or terminated.get("reason"):
+                    item["container_states"].append({
+                        "name": container.get("name", ""),
+                        "waiting_reason": waiting.get("reason"),
+                        "waiting_message": waiting.get("message"),
+                        "last_termination_reason": terminated.get("reason"),
+                        "last_termination_message": terminated.get("message"),
+                        "exit_code": terminated.get("exitCode"),
+                    })
+            pod_data.append(item)
+            if not ready:
+                unhealthy_pods.append(item)
+
+        warning_events = []
+        for event in event_items:
+            involved = event.get("involvedObject") or {}
+            warning_events.append({
+                "time": event.get("lastTimestamp") or event.get("eventTime") or event.get("metadata", {}).get("creationTimestamp"),
+                "reason": event.get("reason", ""),
+                "message": event.get("message", "")[:500],
+                "object_kind": involved.get("kind", ""),
+                "object_name": involved.get("name", ""),
+                "count": event.get("count", 1),
+            })
+        warning_events.sort(key=lambda item: item["time"] or "", reverse=True)
+
+        for pod in unhealthy_pods[:3]:
+            log_result = _kubectl(
+                "logs", pod["name"], "-n", self.ns, "--all-containers=true", "--tail=30", "--since=10m",
+                check=False,
+            )
+            if log_result.returncode == 0 and log_result.stdout.strip():
+                pod["recent_logs"] = log_result.stdout[-3000:]
+            elif log_result.returncode != 0:
+                pod["log_error"] = log_result.stderr.strip()[:500]
+
+        return {
+            "deployments": deployment_data,
+            "pods": pod_data,
+            "unhealthy_pods": unhealthy_pods,
+            "warning_events": warning_events[:20],
+        }
+
     def scale(self, service, replicas):
         _kubectl("scale", f"deployment/{service}", f"--replicas={replicas}", "-n", self.ns)
-        _kubectl("rollout", "status", f"deployment/{service}", "-n", self.ns, "--timeout=180s", check=False)
+        result = _kubectl(
+            "rollout", "status", f"deployment/{service}", "-n", self.ns, "--timeout=180s", check=False
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Rollout for {service} did not complete: {result.stderr.strip()}")
 
 
 class SimEnv:

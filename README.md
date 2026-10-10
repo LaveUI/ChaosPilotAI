@@ -158,6 +158,46 @@ All three are in `chaosai/agents.py`.
 
 The safety guard is deliberately plain code, not an agent: the agents decide, the code enforces the limits.
 
+## Monitor manually injected faults with a local agent
+
+The `monitor` command is separate from the Planner/Injector experiment loop. It continuously probes
+the configured application URLs and inspects Kubernetes deployments, pod readiness, recent warning
+events, and bounded logs from unhealthy pods. When it detects an incident, it sends that evidence and
+the dependency graph to Ollama running on the same machine. It prints the diagnosis and can offer a
+limited scale-up only for a currently affected, stateless application deployment. **It never changes
+the cluster without you typing `yes` at the approval prompt.** Stateful services such as Redis and
+protected services are not eligible for this fix. Incident records are appended to
+`runs/monitor/incidents.jsonl`.
+
+Install Ollama locally and download the configured model:
+
+```bash
+ollama pull qwen2.5:3b
+```
+
+Ensure Ollama is running (`ollama serve` if it is not already running). Its API URL must remain a
+loopback address; the agent refuses non-local model endpoints. Keep the app's port-forward active in
+a separate terminal:
+
+```bash
+kubectl port-forward deployment/frontend 8080:8080
+```
+
+In the project terminal, build the map, collect a healthy baseline, and start monitoring:
+
+```bash
+python3 -m chaosai map
+python3 -m chaosai baseline --seconds 30
+python3 -m chaosai monitor
+```
+
+Keep the monitor running and inject a fault manually through Chaos Mesh using another terminal or the
+Chaos Mesh dashboard. Review its diagnosis; type `yes` only if you approve the proposed scale-up, or
+any other response to decline. Stop monitoring with Ctrl+C. Settings for polling, detection thresholds,
+Ollama model, and maximum replicas are in the `local_agent` section of `config.yaml`. It requires
+Kubernetes permissions to read pods, deployments, events, and logs; applying an approved fix also
+requires permission to scale deployments.
+
 ## Failures injected
 
 | Failure | Chaos Mesh kind | Effect |
@@ -205,6 +245,7 @@ chaosai/
   analyzer.py  scoring + recommendations (+ optional LLM summary)
   report.py    self-contained HTML report
   env.py       KubeEnv (real) and SimEnv (offline simulator)
+  local_agent.py Ollama-backed monitor and approval-gated scale-up
   llm.py       optional wrapper around the Gemini API
   config.py    defaults, merged with config.yaml
   cli.py       commands
@@ -219,6 +260,8 @@ docs/          architecture page, dependency map, sample report
 - **Chaos Mesh pods crash on kind:** check the containerd settings in `setup.sh`.
 - **Network delay has no effect:** make sure the `chaos-daemon` pods are running in the `chaos-mesh` namespace.
 - **A fault will not go away:** `python3 -m chaosai kill`.
+- **Monitor cannot reach Ollama:** start `ollama serve` and verify `ollama pull qwen2.5:3b` completed.
+- **Monitor does not detect HTTP errors:** check that port-forward is active and `target_urls` in `config.yaml` point to your app.
 - **A manifest is rejected:** `kubectl apply --dry-run=server -f runs/<id>/<file>.yaml` shows why.
 - **Real-cluster behavior not matching the simulator:** the simulator is a toy model. Trust cluster numbers.
 
@@ -229,4 +272,5 @@ Online Boutique (sample app), kind, kubectl, Helm, Chaos Mesh, Python, PyYAML, a
 ## Ideas to extend
 
 Alerts before and at the abort point, a checkout probe, a traffic-spike fault, combined failures, a live
-dashboard, Prometheus/OpenTelemetry queries in the guard, LLM-written fixes, and scheduled runs in CI.
+dashboard, Prometheus/OpenTelemetry queries in the guard, broader approval-gated remediation actions,
+and scheduled runs in CI.
