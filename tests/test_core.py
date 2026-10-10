@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -365,7 +366,8 @@ class LocalMonitorTests(unittest.TestCase):
         with patch("chaosai.local_agent.urllib.request.urlopen", return_value=Response()) as urlopen:
             result = local_agent.diagnose(self.cfg, {"incident": "test"})
 
-        request, timeout = urlopen.call_args.args
+        request, = urlopen.call_args.args
+        timeout = urlopen.call_args.kwargs["timeout"]
         body = json.loads(request.data)
         self.assertEqual(result["diagnosis"], "ok")
         self.assertEqual(body["keep_alive"], "10m")
