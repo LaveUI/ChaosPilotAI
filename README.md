@@ -72,9 +72,10 @@ so the Planner targets them first. To regenerate: `python3 -m chaosai map` write
 ```bash
 pip install -r requirements.txt
 python3 -m chaosai --sim map
+python3 -m unittest discover -s tests
 python3 -m chaosai --sim baseline
 python3 -m chaosai --sim agent --rounds 3
-python3 -m unittest discover -s tests
+python3 -m chaosai --sim run
 ```
 Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
 The simulator is a toy model for development; its numbers are not real results.
@@ -107,6 +108,7 @@ Check that `http://localhost:8080` shows the shop, then run the agent loop:
 python3 -m chaosai map
 python3 -m chaosai baseline --seconds 60
 python3 -m chaosai agent --rounds 3
+python3 -m chaosai --sim run
 ```
 
 ### Turning on the LLM (optional)
