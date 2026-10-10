@@ -41,10 +41,7 @@ A full diagram is in `docs/architecture.html`.
 
 The mapper builds this automatically from the app's Kubernetes manifests: 12 services and 16 dependencies.
 
-<!-- FIGURE: save your screenshot as docs/dependency-map.png and it appears here -->
-![Dependency map of Online Boutique](docs/dependency-map.png)
 
-The same map as a live diagram (GitHub renders this block as a picture):
 
 ```mermaid
 graph LR
