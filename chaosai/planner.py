@@ -3,12 +3,14 @@ every suggestion is validated against the allowlist and the dependency graph."""
 from . import llm
 from .chaos import ACTION_LABELS
 
-SYSTEM = """You are a chaos-engineering planner for a Kubernetes microservice app.
-Choose the most informative failure experiments to run next. Prefer: services many others depend on,
-single-replica services (single points of failure), and combinations not yet tested.
+SYSTEM = """You are the planner agent in a chaos-engineering system for a Kubernetes microservice app.
+Rank the most informative failure experiments to run next, best first. Use the dependency graph:
+prefer services many others depend on and single-replica services (single points of failure).
+Use the observation of the live system: do not target a service that is already unhealthy.
+Use already_tested: prefer failure types and services not yet tested, and build on what earlier rounds showed.
 Respond with ONLY a JSON object: {"experiments":[{"service":"<name>","action":"<allowed action>","rationale":"<one or two sentences>"}]}.
-Use only services from graph.nodes and only actions from allowlist. Never pick excluded services. One experiment per service."""
-
+Return `count` experiments in ranked order. Use only services from graph.nodes and only actions from
+allowlist. Never pick excluded services. One experiment per service."""
 
 def _by_name(graph):
     return {n["name"]: n for n in graph["nodes"]}
@@ -81,7 +83,7 @@ def _validate_llm(raw, graph, cfg, n):
     return picks[:n]
 
 
-def plan(graph, cfg, history=None, n=3, mode="auto"):
+def plan(graph, cfg, history=None, n=3, mode="auto", observation=None):
     if mode not in {"auto", "llm", "rule-based"}:
         raise ValueError(f"Unknown planner mode: {mode}")
     history = history or []
@@ -92,6 +94,8 @@ def plan(graph, cfg, history=None, n=3, mode="auto"):
         try:
             payload = {"graph": graph, "allowlist": cfg["allowlist"], "excluded": cfg["exclude_services"],
                        "already_tested": history, "count": n}
+            if observation:
+                payload["observation"] = observation
             picks = _validate_llm(llm.ask_json(cfg, SYSTEM, payload), graph, cfg, n)
             if picks:
                 return {"planner": "llm", "llm_model": llm.model_name(cfg),

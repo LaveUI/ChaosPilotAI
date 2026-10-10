@@ -1,3 +1,7 @@
 pyyaml>=6.0
-# Optional: enables the Gemini planner and AI-written summary (falls back to rule-based without it)
+# Optional: enables the Gemini agents (falls back to rule-based without a key)
 google-genai>=1.0
+# Optional: agent orchestration as a LangGraph state graph, and Gemini through LangChain.
+# Without these the same agents run in a plain Python loop.
+langgraph>=1.0
+langchain-google-genai>=4.0
