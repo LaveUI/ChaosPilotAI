@@ -77,7 +77,10 @@ def cmd_plan(a, cfg):
     if latest and a.avoid_tested:
         history = [{"service": e["service"], "action": e["action"]}
                    for e in _load(_results_path(cfg, latest), "")["experiments"]]
-    p = planner.plan(graph, cfg, history, a.n)
+    try:
+        p = planner.plan(graph, cfg, history, a.n, mode=a.planner)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     _save(cfg["plan_file"], p)
     print(f"Plan from {p['planner']} planner -> {cfg['plan_file']}")
     for e in p["experiments"]:
@@ -90,7 +93,8 @@ def _execute(cfg, sim, plan, compare_to=None):
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = os.path.join(cfg["runs_dir"], run_id)
     done, limits = runner.run_plan(plan, cfg, env, baseline, run_dir, os.path.join(cfg["runs_dir"], "STOP"))
-    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"], "baseline": baseline,
+    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"],
+               "llm_model": plan.get("llm_model"), "baseline": baseline,
                "limits": limits, "plan": plan, "experiments": done, "compare_to": compare_to}
     if not done:
         raise SystemExit("No experiments completed.")
@@ -159,8 +163,11 @@ def cmd_agent(a, cfg):
     env = make_env(cfg, graph, a.sim)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run_dir = os.path.join(cfg["runs_dir"], run_id)
-    results = agents.run_agents(cfg, env, graph, baseline, a.rounds, run_id, run_dir,
-                                os.path.join(cfg["runs_dir"], "STOP"))
+    try:
+        results = agents.run_agents(cfg, env, graph, baseline, a.rounds, run_id, run_dir,
+                                    os.path.join(cfg["runs_dir"], "STOP"), planner_mode=a.planner)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     if not results["experiments"]:
         raise SystemExit("No experiments completed.")
     _save(os.path.join(run_dir, "results.json"), results)
@@ -191,6 +198,8 @@ def main(argv=None):
     b.add_argument("--seconds", type=int)
     pl = sub.add_parser("plan", help="choose experiments (LLM if configured, else rule-based)")
     pl.add_argument("--n", type=int, default=3)
+    pl.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+                    help="planner selection (default: auto, using Gemini when available)")
     pl.add_argument("--avoid-tested", action="store_true", help="deprioritize pairs from the latest run")
     r = sub.add_parser("run", help="run a plan with safety limits, then score and report")
     r.add_argument("--plan")
@@ -201,6 +210,8 @@ def main(argv=None):
     rp.add_argument("--run")
     ag = sub.add_parser("agent", help="agent loop: plan, inject and analyze one experiment per round")
     ag.add_argument("--rounds", type=int, default=3)
+    ag.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+                    help="planner selection (default: auto, using Gemini when available)")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
     a = p.parse_args(argv)
     cfg = config.load(a.config)

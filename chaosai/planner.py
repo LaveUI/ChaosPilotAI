@@ -81,16 +81,26 @@ def _validate_llm(raw, graph, cfg, n):
     return picks[:n]
 
 
-def plan(graph, cfg, history=None, n=3):
+def plan(graph, cfg, history=None, n=3, mode="auto"):
+    if mode not in {"auto", "llm", "rule-based"}:
+        raise ValueError(f"Unknown planner mode: {mode}")
     history = history or []
-    if llm.available(cfg):
+    use_llm = mode == "llm" or (mode == "auto" and llm.available(cfg))
+    if mode == "llm" and not llm.available(cfg):
+        raise RuntimeError("LLM planner selected, but Gemini is unavailable. Set GEMINI_API_KEY and install google-genai.")
+    if use_llm:
         try:
             payload = {"graph": graph, "allowlist": cfg["allowlist"], "excluded": cfg["exclude_services"],
                        "already_tested": history, "count": n}
             picks = _validate_llm(llm.ask_json(cfg, SYSTEM, payload), graph, cfg, n)
             if picks:
-                return {"planner": "llm", "experiments": _finalize(picks, graph, cfg)}
+                return {"planner": "llm", "llm_model": llm.model_name(cfg),
+                        "experiments": _finalize(picks, graph, cfg)}
+            if mode == "llm":
+                raise RuntimeError("Gemini returned no valid experiments.")
             print("LLM returned no valid experiments; using rule-based planner.")
-        except Exception as exc:  # network, auth, parse errors: never block the run
+        except Exception as exc:
+            if mode == "llm":
+                raise RuntimeError(f"LLM planner failed ({exc.__class__.__name__}): {exc}") from exc
             print(f"LLM planner failed ({exc.__class__.__name__}); using rule-based planner.")
     return {"planner": "rule-based", "experiments": _finalize(heuristic_plan(graph, cfg, history, n), graph, cfg)}

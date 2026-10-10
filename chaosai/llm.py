@@ -1,29 +1,36 @@
-"""Thin optional wrapper around the Anthropic API. Everything works without it."""
+"""Thin optional wrapper around the Gemini API. Everything works without it."""
 import json
 import os
-import re
+
+
+def model_name(cfg):
+    return os.environ.get("CHAOSAI_MODEL", cfg["llm"]["model"])
 
 
 def available(cfg):
-    if not cfg["llm"]["enabled"] or not os.environ.get("ANTHROPIC_API_KEY"):
+    if not cfg["llm"]["enabled"] or not os.environ.get("GEMINI_API_KEY"):
         return False
     try:
-        import anthropic  # noqa: F401
+        from google import genai  # noqa: F401
         return True
     except ImportError:
         return False
 
 
 def ask_json(cfg, system, payload, max_tokens=1500):
-    import anthropic
-    client = anthropic.Anthropic()
-    model = os.environ.get("CHAOSAI_MODEL", cfg["llm"]["model"])
-    msg = client.messages.create(
+    from google import genai
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    model = model_name(cfg)
+    response = client.models.generate_content(
         model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": json.dumps(payload)}],
+        contents=json.dumps(payload),
+        config=genai.types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
     )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
-    return json.loads(text)
+    if not response.text:
+        raise ValueError("Gemini returned an empty response.")
+    return json.loads(response.text)

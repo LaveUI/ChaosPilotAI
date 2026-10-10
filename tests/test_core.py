@@ -3,11 +3,12 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from chaosai import analyzer, chaos, config, mapper, planner, runner  # noqa: E402
+from chaosai import analyzer, chaos, config, mapper, planner, report, runner  # noqa: E402
 from chaosai.env import SimEnv  # noqa: E402
 from chaosai.guard import Guard  # noqa: E402
 
@@ -114,6 +115,53 @@ class PlannerTests(unittest.TestCase):
             {"service": "adservice", "action": "rm-rf", "rationale": "not allowed"}]}
         picks = planner._validate_llm(raw, g, cfg, 5)
         self.assertEqual([p["service"] for p in picks], ["cartservice"])
+
+    def test_explicit_llm_requires_gemini(self):
+        with patch("chaosai.planner.llm.available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "Gemini is unavailable"):
+                planner.plan(mapper.build_graph(MANIFEST), config.load(None), mode="llm")
+
+    def test_explicit_rule_based_does_not_call_gemini(self):
+        with patch("chaosai.planner.llm.available", side_effect=AssertionError("must not check Gemini")):
+            result = planner.plan(mapper.build_graph(MANIFEST), config.load(None), mode="rule-based")
+        self.assertEqual(result["planner"], "rule-based")
+
+
+class ReportTests(unittest.TestCase):
+    def test_report_labels_gemini_content_and_code_calculated_results(self):
+        results = {
+            "run_id": "test-run",
+            "env": "simulated",
+            "planner": "llm",
+            "llm_model": "gemini-test",
+            "resilience_score": 90,
+            "baseline": {"error_rate": 0.0, "p95_ms": 100},
+            "summary": "The service recovered after the test.",
+            "experiments": [{
+                "service": "cartservice",
+                "action": "pod-failure",
+                "score": 90,
+                "error_rate": 0.0,
+                "p95_ms": 110,
+                "recovered": True,
+                "recovery_s": 1,
+                "aborted": False,
+                "abort_reason": None,
+                "abort_latency_s": None,
+                "rationale": "Tests whether callers tolerate a pod outage.",
+                "planner": "llm",
+                "breakdown": {"errors": 0, "latency": 0, "recovery": 0, "abort": 0},
+                "samples": [],
+                "recommendations": [],
+            }],
+        }
+
+        rendered = report.render(results, {"nodes": []})
+
+        self.assertIn("Gemini model: gemini-test", rendered)
+        self.assertIn("Gemini-generated summary", rendered)
+        self.assertIn("Gemini planner rationale", rendered)
+        self.assertIn("Probe measurements, resilience scores", rendered)
 
 
 class SimulatedRunTests(unittest.TestCase):

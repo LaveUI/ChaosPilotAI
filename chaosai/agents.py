@@ -7,7 +7,7 @@
   AnalystAgent   scores the result, says what it means and recommends fixes.
 
 The loop is Planner -> Injector -> Analyst -> back to the Planner with the new result.
-With ANTHROPIC_API_KEY set, the Planner asks the LLM; without it, it uses the
+With GEMINI_API_KEY set, the Planner asks the LLM; without it, it uses the
 transparent rules below. Either way every choice is validated against the allowlist.
 """
 import os
@@ -29,19 +29,32 @@ def _nodes(graph):
 class PlannerAgent:
     """Decides the next experiment. One decision per round, so it can react to results."""
 
-    def __init__(self, graph, cfg):
+    def __init__(self, graph, cfg, mode="auto"):
         self.graph, self.cfg = graph, cfg
-        self.mode = "llm" if llm.available(cfg) else "rule-based"
+        if mode not in {"auto", "llm", "rule-based"}:
+            raise ValueError(f"Unknown planner mode: {mode}")
+        if mode == "llm" and not llm.available(cfg):
+            raise RuntimeError("LLM planner selected, but Gemini is unavailable. Set GEMINI_API_KEY and install google-genai.")
+        self.mode = "llm" if mode == "llm" or (mode == "auto" and llm.available(cfg)) else "rule-based"
 
     def decide(self, history):
         tested = {(h["service"], h["action"]) for h in history}
         if self.mode == "llm":
-            p = planner.plan(self.graph, self.cfg, history, 1)
+            p = planner.plan(self.graph, self.cfg, history, 1, mode="llm")
             exps = p["experiments"]
             if p["planner"] == "llm" and exps and (exps[0]["service"], exps[0]["action"]) not in tested:
-                return exps[0]
+                exp = exps[0]
+                exp["planner"] = "llm"
+                exp["llm_model"] = p["llm_model"]
+                return exp
+            if self.mode == "llm":
+                print("  [Planner agent] Gemini returned no new experiment; stopping.")
+                return None
             print("  [Planner agent] LLM gave no new experiment; using the rules for this round.")
-        return self._decide_by_rules(history, tested)
+        exp = self._decide_by_rules(history, tested)
+        if exp:
+            exp["planner"] = "rule-based"
+        return exp
 
     def _decide_by_rules(self, history, tested):
         tried_actions = {h["action"] for h in history}
@@ -152,12 +165,12 @@ class AnalystAgent:
         return result
 
 
-def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file):
+def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, planner_mode="auto"):
     """Run the Planner -> Injector -> Analyst loop and return a results dict shaped like `run` produces."""
     guard = Guard(cfg, baseline, stop_file)
     if os.path.exists(stop_file):
         os.remove(stop_file)
-    planner_agent = PlannerAgent(graph, cfg)
+    planner_agent = PlannerAgent(graph, cfg, planner_mode)
     injector_agent = InjectorAgent(cfg, env, baseline, guard, run_dir)
     analyst_agent = AnalystAgent(graph, baseline)
     print(f"Agents: planner ({planner_agent.mode}), injector, analyst. Safety limits: {guard.limits()}")
@@ -188,8 +201,12 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file):
     except KeyboardInterrupt:
         print("\nInterrupted: experiment removed, session ended early.")
 
-    plan = {"planner": f"agents ({planner_agent.mode})", "experiments": chosen}
-    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"], "baseline": baseline,
+    sources = {exp["planner"] for exp in chosen}
+    planner_label = "agents (" + ", ".join(sorted(sources)) + ")"
+    llm_model = next((exp["llm_model"] for exp in chosen if exp.get("llm_model")), None)
+    plan = {"planner": planner_label, "llm_model": llm_model, "experiments": chosen}
+    results = {"run_id": run_id, "env": env.name, "planner": plan["planner"], "llm_model": llm_model,
+               "baseline": baseline,
                "limits": guard.limits(), "plan": plan, "experiments": done, "compare_to": None}
     results["resilience_score"] = round(sum(e["score"] for e in done) / len(done), 1) if done else None
     results["weaknesses"] = [{"service": e["service"], "action": e["action"], "score": e["score"]}

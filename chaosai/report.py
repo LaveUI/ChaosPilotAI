@@ -406,18 +406,9 @@ def experiment_conclusion(experiment, baseline):
 def render(results, graph, previous=None):
     e = html.escape
     score = results["resilience_score"]
-
-    prev_score = (
-        previous["resilience_score"] if previous else None
-    )
-
-    prev_by = (
-        {
-            (p["service"], p["action"]): p
-            for p in previous["experiments"]
-        }
-        if previous else {}
-    )
+    llm_model = results.get("llm_model") or results.get("summary_model")
+    prev_score = previous["resilience_score"] if previous else None
+    prev_by = {(p["service"], p["action"]): p for p in previous["experiments"]} if previous else {}
 
     parts = [
         "<!doctype html><html lang='en'>"
@@ -433,7 +424,8 @@ def render(results, graph, previous=None):
         f"Run {e(results['run_id'])} &middot; "
         f"environment: {e(results['env'])} &middot; "
         f"planner: {e(results['planner'])}"
-        f"</div>"
+        + (f" &middot; Gemini model: {e(llm_model)}" if llm_model else "")
+        + "</div>"
     ]
 
     # ---------------------------------------
@@ -473,7 +465,7 @@ def render(results, graph, previous=None):
     if results.get("summary"):
         parts.append(
             f"<div class='card'>"
-            f"<b>Summary</b>"
+            f"<b>Gemini-generated summary</b>"
             f"<p>{e(results['summary'])}</p>"
             f"</div>"
         )
@@ -539,6 +531,12 @@ def render(results, graph, previous=None):
     for x in results["experiments"]:
         service = e(str(x.get("service", "Unknown service")))
         action = e(str(x.get("action", "Unknown fault")))
+        planner_source = x.get("planner", results.get("planner"))
+        rationale_label = (
+            "Gemini planner rationale"
+            if planner_source in ("llm", "agents (llm)")
+            else "Planner rationale"
+        )
         abort = (
             f"<span class='pill abort'>"
             f"safety abort: {e(str(x.get('abort_reason') or 'reason unavailable'))}"
@@ -559,7 +557,8 @@ def render(results, graph, previous=None):
 
             f"<p class='muted' "
             f"style='margin:4px 0 8px'>"
-            f"Why this test: {e(str(x.get('rationale', 'Rationale unavailable.')))}"
+            f"<b>{rationale_label}:</b> "
+            f"{e(str(x.get('rationale', 'Rationale unavailable.')))}"
             f"</p>"
 
             f"{timeline_svg(x.get('samples'), events=x.get('events'), phase_samples=x.get('phase_samples'))}"
@@ -639,6 +638,11 @@ def render(results, graph, previous=None):
         "</tr>"
     )
 
+    parts.append(
+        "<p class='muted'>Probe measurements, resilience scores, penalties, and fix "
+        "recommendations are calculated by ChaosPilot; Gemini supplies planner "
+        "rationales and, when available, the summary.</p>"
+    )
     for n in graph["nodes"]:
         parts.append(
             f"<tr>"

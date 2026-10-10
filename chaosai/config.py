@@ -33,7 +33,7 @@ DEFAULTS = {
         "cpu_workers": 2,
         "cpu_load": 90,
     },
-    "llm": {"enabled": True, "model": "claude-sonnet-5-5"},
+    "llm": {"enabled": True, "model": "gemini-3.8-flash"},
     "graph_overrides": {"add_edges": [], "remove_edges": []},
     "runs_dir": "runs",
     "graph_file": "graph.json",
