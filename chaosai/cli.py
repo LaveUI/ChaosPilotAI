@@ -153,6 +153,25 @@ def cmd_report(a, cfg):
         f.write(report.render(results, _graph(cfg), prev))
     print(f"Wrote {out}")
 
+def cmd_agent(a, cfg):
+    from . import agents
+    graph, baseline = _graph(cfg), _baseline(cfg)
+    env = make_env(cfg, graph, a.sim)
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    run_dir = os.path.join(cfg["runs_dir"], run_id)
+    results = agents.run_agents(cfg, env, graph, baseline, a.rounds, run_id, run_dir,
+                                os.path.join(cfg["runs_dir"], "STOP"))
+    if not results["experiments"]:
+        raise SystemExit("No experiments completed.")
+    _save(os.path.join(run_dir, "results.json"), results)
+    with open(os.path.join(run_dir, "report.html"), "w") as f:
+        f.write(report.render(results, graph, None))
+    with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w") as f:
+        f.write(run_id)
+    print(f"\nResilience score: {results['resilience_score']}/100")
+    for w in results["weaknesses"]:
+        print(f"  weak: {w['action']} on {w['service']} scored {w['score']}")
+    print(f"Report: {os.path.join(run_dir, 'report.html')}")
 
 def cmd_kill(a, cfg):
     os.makedirs(cfg["runs_dir"], exist_ok=True)
@@ -180,8 +199,10 @@ def main(argv=None):
     sub.add_parser("rerun", help="re-run the latest plan and compare scores")
     rp = sub.add_parser("report", help="regenerate an HTML report")
     rp.add_argument("--run")
+    ag = sub.add_parser("agent", help="agent loop: plan, inject and analyze one experiment per round")
+    ag.add_argument("--rounds", type=int, default=3)
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,
-     "rerun": cmd_rerun, "report": cmd_report, "kill": cmd_kill}[a.cmd](a, cfg)
+     "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "kill": cmd_kill}[a.cmd](a, cfg)
