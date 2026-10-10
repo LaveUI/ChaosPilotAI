@@ -12,7 +12,7 @@ Built for the Bosch hackathon problem statement "AI-Driven Chaos Engineering for
 | Sandbox | Local Kubernetes cluster with [kind](https://kind.sigs.k8s.io/) |
 | Fault injection | [Chaos Mesh](https://chaos-mesh.org/) |
 | Language | Python 3.10+ |
-| LLM | Optional (Anthropic API), with a rule-based fallback |
+| LLM | Optional (Google Gemini API), with a rule-based fallback |
 
 ## How it works
 
@@ -40,8 +40,6 @@ A full diagram is in `docs/architecture.html`.
 ## Dependency map
 
 The mapper builds this automatically from the app's Kubernetes manifests: 12 services and 16 dependencies.
-
-
 
 ```mermaid
 graph LR
@@ -80,9 +78,7 @@ python3 -m unittest discover -s tests
 ```
 Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
 The simulator is a toy model for development; its numbers are not real results.
-Open the newest `runs/*/report.html`. A pre-generated example is in `docs/sample-report.html`.
-Reports identify the Gemini model and label its planner rationale and optional run summary. Probe
-measurements, resilience scores, and fix recommendations are calculated by ChaosPilot.
+A pre-generated example report is in `docs/sample-report.html`.
 
 ### On a real cluster
 
@@ -116,17 +112,21 @@ python3 -m chaosai agent --rounds 3
 ### Turning on the LLM (optional)
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-python3 -m chaosai agent --rounds 3     # the header line now shows "planner (llm)"
-**Optional Gemini-powered planner** (otherwise a rule-based planner runs):
-```bash
-python3 -m pip install google-genai
+pip install google-genai
 export GEMINI_API_KEY=your-gemini-api-key
-python3 -m chaosai plan --planner llm --n 4
+python3 -m chaosai agent --rounds 3 --planner llm
 ```
-The model defaults to `gemini-3.8-flash`; override it with `CHAOSAI_MODEL` if needed.
-Choose `--planner rule-based` to force local rules, or `--planner auto` to use Gemini when available
-and otherwise fall back to the rules. The same option is available on `agent`.
+The header line of the run then shows `planner (llm)`, and the report names the Gemini model.
+The model defaults to `gemini-3.8-flash`; override it with `CHAOSAI_MODEL`.
+
+| `--planner` value | Behaviour |
+|---|---|
+| `auto` (default) | Uses Gemini when a key is set, otherwise the local rules |
+| `llm` | Uses Gemini only, and stops with an error if it is unavailable |
+| `rule-based` | Uses the local rules only |
+
+The same option works on `plan`. Gemini supplies the planner's reasoning and the run summary. Probe
+measurements, resilience scores and fix recommendations are calculated by ChaosPilot.
 
 ## Commands
 
@@ -174,7 +174,7 @@ Each experiment lasts 60 seconds and targets one service. Settings are in `confi
 4. **Pre-flight check.** The Injector agent refuses to start if the app is already unhealthy.
 5. **Automatic abort** on rolling error rate, p95 latency, or number of newly unhealthy pods (`safety:` in `config.yaml`). The time taken to remove the fault is measured and shown in the report.
 6. **Manual kill switch:** Ctrl+C, `python3 -m chaosai kill`, or `touch runs/STOP`. The fault is always deleted in a `finally` block.
-7. To rehearse the abort for the demo, run with a low limit, for example set `max_error_rate: 0.05` in `config.yaml`.
+7. To rehearse the abort for the demo, use the strict test config: `python3 -m chaosai --config config-safety-test.yaml run`.
 
 ## Resilience score
 
@@ -203,18 +203,13 @@ chaosai/
   analyzer.py  scoring + recommendations (+ optional LLM summary)
   report.py    self-contained HTML report
   env.py       KubeEnv (real) and SimEnv (offline simulator)
-  llm.py       optional wrapper around the Anthropic API
+  llm.py       optional wrapper around the Gemini API
   config.py    defaults, merged with config.yaml
   cli.py       commands
-tests/         12 unit tests (mapper, rendering, guard, scoring, planner, simulated run)
+tests/         15 unit tests (mapper, rendering, guard, scoring, planner, simulated run)
 sample/        Online Boutique manifest used when the upstream repo is not cloned
 docs/          architecture page, dependency map, sample report
 ```
-
-## Day-by-day
-
-- **Day 1 checkpoint:** `./setup.sh`, then `map`, `baseline`, one `run` with a low `max_error_rate` to show the kill switch firing. Minimum: running app, dependency map, one safe injection with a working kill switch.
-- **Day 2:** set `GEMINI_API_KEY`, `plan`, `run`, `fix`, `rerun`, and show the before/after report.
 
 ## Troubleshooting
 
@@ -227,7 +222,7 @@ docs/          architecture page, dependency map, sample report
 
 ## Tools and libraries used
 
-Online Boutique (sample app), kind, kubectl, Helm, Chaos Mesh, Python, PyYAML, and optionally the Anthropic Python SDK.
+Online Boutique (sample app), kind, kubectl, Helm, Chaos Mesh, Python, PyYAML, and optionally the Google Gen AI Python SDK (`google-genai`).
 
 ## Ideas to extend
 
