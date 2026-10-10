@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI-driven chaos engineering: architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    --bg: #f7f5fa; --ink: #201c2b; --muted: #6b6578; --card: #ffffff; --line: #cfc9da;
+    --pink: #d4146a; --pink-soft: #fbe8f1; --teal: #00849e; --teal-soft: #e3f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15121c; --ink: #efeaf7; --muted: #a59db5; --card: #1f1b2a; --line: #3a3449;
+      --pink: #ff4d97; --pink-soft: #2b1624; --teal: #3cc3dc; --teal-soft: #11262c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15121c; --ink: #efeaf7; --muted: #a59db5; --card: #1f1b2a; --line: #3a3449;
+    --pink: #ff4d97; --pink-soft: #2b1624; --teal: #3cc3dc; --teal-soft: #11262c;
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 20px 56px; }
+  h1 {
+    font-family: "Bricolage Grotesque", "Instrument Sans", system-ui, sans-serif;
+    font-size: clamp(26px, 4vw, 38px); line-height: 1.12; margin: 0 0 10px; letter-spacing: -0.01em;
+  }
+  .lede { color: var(--muted); max-width: 66ch; margin: 0 0 24px; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+  svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  svg text { font-family: "Instrument Sans", system-ui, sans-serif; fill: var(--ink); }
+  .t { font-size: 15px; font-weight: 600; }
+  .s { font-size: 12px; fill: var(--muted); }
+  .lbl { font-size: 11px; fill: var(--muted); }
+  .zone { font-family: "Bricolage Grotesque", sans-serif; font-size: 14px; font-weight: 700; }
+  .box { fill: var(--card); stroke: var(--line); stroke-width: 1.2; }
+  .ai .box { stroke: var(--pink); }
+  .sb .box { stroke: var(--teal); }
+  .edge { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+  .abort { fill: none; stroke: var(--pink); stroke-width: 1.8; stroke-dasharray: 6 4; }
+  .loop { fill: none; stroke: var(--teal); stroke-width: 1.8; stroke-dasharray: 6 4; }
+  .badge { fill: var(--pink); }
+  .bn { fill: #fff !important; font-size: 12px; font-weight: 700; text-anchor: middle; }
+  h2 { font-family: "Bricolage Grotesque", sans-serif; font-size: 20px; margin: 32px 0 12px; }
+  ol { padding-left: 0; list-style: none; margin: 0; display: grid; gap: 10px; max-width: 78ch; }
+  li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: start; }
+  li span.n {
+    width: 24px; height: 24px; border-radius: 50%; background: var(--pink); color: #fff;
+    font-size: 12px; font-weight: 700; display: grid; place-items: center; margin-top: 2px;
+  }
+  li b { font-weight: 600; }
+  .key { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; color: var(--muted); font-size: 14px; }
+  .key i { display: inline-block; width: 30px; border-top: 2px dashed; vertical-align: middle; margin-right: 8px; }
+  .key .a i { border-color: var(--pink); } .key .b i { border-color: var(--teal); }
+</style>
+</head>
+<body>
+<main>
+  <h1>AI-driven chaos engineering: architecture</h1>
+  <p class="lede">An AI layer plans and judges the experiments. Chaos Mesh or LitmusChaos does the breaking, and OpenTelemetry provides the evidence. Everything runs in a local sandbox cluster.</p>
+
+  <div class="scroll">
+  <svg viewBox="0 0 1100 735" role="img" aria-label="Architecture diagram: a GitHub repo feeds a dependency mapper in the AI agent; the planner sends experiments to a chaos engine in the sandbox cluster, which injects faults into a sample app; telemetry flows to the safety guard and analyzer, which produce a report and loop back to the planner.">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--ink)"/>
+      </marker>
+      <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--pink)"/>
+      </marker>
+      <marker id="at" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--teal)"/>
+      </marker>
+    </defs>
+
+    <!-- Zones -->
+    <rect x="30" y="130" width="480" height="480" rx="14" style="fill:var(--pink-soft);stroke:var(--pink)" stroke-width="1.5"/>
+    <text x="50" y="154" class="zone" style="fill:var(--pink)">AI resilience agent</text>
+    <rect x="600" y="245" width="460" height="365" rx="14" style="fill:var(--teal-soft);stroke:var(--teal)" stroke-width="1.5"/>
+    <text x="620" y="269" class="zone" style="fill:var(--teal)">Sandbox cluster (kind or minikube)</text>
+
+    <!-- External repo -->
+    <rect x="285" y="30" width="200" height="60" rx="8" class="box" style="stroke:var(--ink)"/>
+    <text x="303" y="55" class="t">Public GitHub repo</text>
+    <text x="303" y="74" class="s">Sample app and manifests</text>
+
+    <!-- Agent boxes -->
+    <g class="ai">
+      <rect x="85" y="175" width="400" height="70" rx="8" class="box"/>
+      <text x="103" y="203" class="t">Dependency mapper</text>
+      <text x="103" y="223" class="s">Reads manifests and builds a service graph</text>
+
+      <rect x="85" y="285" width="400" height="70" rx="8" class="box"/>
+      <text x="103" y="313" class="t">Experiment planner (LLM)</text>
+      <text x="103" y="333" class="s">Chooses from a safe allowlist and explains each pick</text>
+
+      <rect x="85" y="395" width="400" height="70" rx="8" class="box"/>
+      <text x="103" y="423" class="t">Safety guard</text>
+      <text x="103" y="443" class="s">Aborts if error rate, latency or blast radius hit limits</text>
+
+      <rect x="85" y="505" width="400" height="70" rx="8" class="box"/>
+      <text x="103" y="533" class="t">Analyzer and scorer</text>
+      <text x="103" y="553" class="s">Finds weak spots, proposes fixes, ranks resilience score</text>
+    </g>
+
+    <!-- Sandbox boxes -->
+    <g class="sb">
+      <rect x="630" y="285" width="400" height="70" rx="8" class="box"/>
+      <text x="648" y="313" class="t">Chaos engine</text>
+      <text x="648" y="333" class="s">Chaos Mesh or LitmusChaos: pod kill, network delay, CPU stress</text>
+
+      <rect x="630" y="395" width="400" height="70" rx="8" class="box"/>
+      <text x="648" y="423" class="t">Sample microservice app</text>
+      <text x="648" y="443" class="s">For example Online Boutique, deployed from the repo</text>
+
+      <rect x="630" y="505" width="400" height="70" rx="8" class="box"/>
+      <text x="648" y="533" class="t">Telemetry stack</text>
+      <text x="648" y="553" class="s">OpenTelemetry Collector, Prometheus, Grafana, Jaeger</text>
+    </g>
+
+    <!-- Report -->
+    <rect x="85" y="650" width="400" height="60" rx="8" class="box" style="stroke:var(--ink)"/>
+    <text x="103" y="676" class="t">Report dashboard</text>
+    <text x="103" y="696" class="s">Resilience score before and after each fix</text>
+
+    <!-- Edges -->
+    <path class="edge" d="M385,90 V175" marker-end="url(#ah)"/>
+    <circle cx="385" cy="116" r="10" class="badge"/><text x="385" y="120" class="bn">1</text>
+
+    <path class="edge" d="M285,245 V285" marker-end="url(#ah)"/>
+    <text x="297" y="269" class="lbl">service graph</text>
+
+    <path class="edge" d="M485,320 H630" marker-end="url(#ah)"/>
+    <circle cx="557" cy="320" r="10" class="badge"/><text x="557" y="324" class="bn">2</text>
+
+    <path class="edge" d="M830,355 V395" marker-end="url(#ah)"/>
+    <circle cx="852" cy="375" r="10" class="badge"/><text x="852" y="379" class="bn">3</text>
+    <text x="868" y="379" class="lbl">inject fault</text>
+
+    <path class="edge" d="M830,465 V505" marker-end="url(#ah)"/>
+    <circle cx="852" cy="485" r="10" class="badge"/><text x="852" y="489" class="bn">4</text>
+    <text x="868" y="489" class="lbl">traces, metrics, logs</text>
+
+    <path class="edge" d="M630,560 H485" marker-end="url(#ah)"/>
+    <text x="528" y="552" class="lbl">query</text>
+
+    <path class="edge" d="M630,520 H545 V445 H485" marker-end="url(#ah)"/>
+    <text x="492" y="439" class="lbl">metrics</text>
+
+    <path class="abort" d="M485,415 H580 V340 H630" marker-end="url(#ap)"/>
+    <text x="498" y="409" class="lbl" style="fill:var(--pink)">abort</text>
+
+    <path class="edge" d="M285,575 V650" marker-end="url(#ah)"/>
+    <circle cx="285" cy="620" r="10" class="badge"/><text x="285" y="624" class="bn">5</text>
+
+    <path class="loop" d="M85,540 H62 V320 H85" marker-end="url(#at)"/>
+    <text transform="translate(50 430) rotate(-90)" text-anchor="middle" class="lbl" style="fill:var(--teal)">apply fix, re-run</text>
+  </svg>
+  </div>
+
+  <div class="key">
+    <span class="a"><i></i>Safety abort path</span>
+    <span class="b"><i></i>Fix-and-verify loop</span>
+  </div>
+
+  <h2>How a run flows</h2>
+  <ol>
+    <li><span class="n">1</span><div><b>Select and understand the app.</b> The mapper reads the repo's manifests and builds a service dependency graph.</div></li>
+    <li><span class="n">2</span><div><b>Plan experiments.</b> The LLM ranks candidate failures from a fixed allowlist by how informative or risky they are, and records its reasoning.</div></li>
+    <li><span class="n">3</span><div><b>Inject controlled failures.</b> The chaos engine applies the chosen fault to one service. The safety guard watches live metrics and triggers an abort if limits are crossed.</div></li>
+    <li><span class="n">4</span><div><b>Observe behavior.</b> OpenTelemetry feeds Prometheus and Jaeger with errors, slowdowns and recovery time.</div></li>
+    <li><span class="n">5</span><div><b>Analyze and report.</b> The analyzer scores resilience, explains weak points and suggests fixes. After a fix is applied, the same experiment re-runs and the score is compared.</div></li>
+  </ol>
+</main>
+</body>
+</html>

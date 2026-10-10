@@ -1,0 +1,3 @@
+pyyaml>=6.0
+# Optional: enables the LLM planner and AI-written summary (falls back to rule-based without it)
+anthropic>=0.40
