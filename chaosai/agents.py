@@ -63,6 +63,7 @@ Rules: use only the numbers given, never invent measurements. Tie every fix to t
 about which service should change. If the target is a data store, do not recommend simply adding replicas
 without replication. If the experiment showed no impact, say so and return an empty fixes list.
 Respond with ONLY JSON: {"diagnosis": "<two or three sentences>", "severity": "critical|high|medium|low|none",
+"root_cause_hypotheses": ["<testable hypothesis>"], "evidence": ["<specific supplied measurement>"],
 "fixes": [{"title": "<short imperative>", "detail": "<why this fix, tied to the evidence>"}]}. At most 4 fixes."""
 
 REPORTER_SYSTEM = """You are the reporting agent in a chaos-engineering system for a Kubernetes app.
@@ -78,6 +79,73 @@ Include only experiments that revealed a weakness, using their exact service and
 
 def _nodes(graph):
     return {n["name"]: n for n in graph["nodes"]}
+
+
+def _has_transient_cause(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if llm.is_transient_error(exc):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _record_llm_call(session, agent, metadata, fallback_reason=None):
+    if session is None:
+        return
+    record = {
+        "agent": agent,
+        "provider": metadata.get("provider", "Gemini"),
+        "model": metadata.get("model"),
+        "backend": metadata.get("backend"),
+        "requested": bool(metadata.get("requested", True)),
+        "attempted": metadata.get("attempts", 0) > 0 or metadata.get("backend") is not None,
+        "gemini_used": bool(metadata.get("succeeded")) and fallback_reason is None,
+        "fallback_used": fallback_reason is not None or not bool(metadata.get("succeeded")),
+        "fallback_reason": fallback_reason or metadata.get("error"),
+        "retry_count": metadata.get("retry_count", 0),
+        "duration_s": metadata.get("duration_s"),
+        "error": metadata.get("error"),
+    }
+    session.setdefault("calls", []).append(record)
+    if record["fallback_reason"] and _has_transient_cause(
+        RuntimeError(record["fallback_reason"])
+    ):
+        session["enabled"] = False
+        session["fallback_reason"] = record["fallback_reason"]
+
+
+def _record_rule_fallback(session, agent, reason):
+    if session is None:
+        return
+    session.setdefault("calls", []).append({
+        "agent": agent,
+        "provider": "Gemini",
+        "model": session.get("model"),
+        "backend": None,
+        "requested": True,
+        "attempted": False,
+        "gemini_used": False,
+        "fallback_used": True,
+        "fallback_reason": reason,
+        "retry_count": 0,
+        "duration_s": 0.0,
+        "error": None,
+    })
+
+
+def _agent_call_status(session, agent):
+    calls = [call for call in (session or {}).get("calls", []) if call["agent"] == agent]
+    if not calls:
+        return "rule-based"
+    used = any(call["gemini_used"] for call in calls)
+    fallback = any(call["fallback_used"] for call in calls)
+    if used and fallback:
+        return "mixed Gemini + fallback"
+    if used:
+        return "Gemini"
+    return "rule-based"
 
 
 def _severity_from_score(score):
@@ -115,8 +183,9 @@ def _compact_cluster(diag, limit=5):
 class ObserverAgent:
     """Watches the whole application and reports whether it is healthy."""
 
-    def __init__(self, cfg, env, graph, use_llm=False):
+    def __init__(self, cfg, env, graph, use_llm=False, llm_session=None):
         self.cfg, self.env, self.use_llm = cfg, env, use_llm
+        self.llm_session = llm_session
         self.services = {n["name"] for n in graph["nodes"]}
 
     def snapshot(self):
@@ -154,17 +223,38 @@ class ObserverAgent:
     def observe(self):
         snap = self.snapshot()
         obs = self._by_rules(snap)
-        if self.use_llm:
+        if self.use_llm and (self.llm_session is None or self.llm_session.get("enabled", True)):
+            metadata = {}
             try:
-                raw = llm.ask_json(self.cfg, OBSERVER_SYSTEM, snap, max_tokens=400)
+                raw = llm.ask_json(
+                    self.cfg, OBSERVER_SYSTEM, snap, max_tokens=400,
+                    schema=llm.OBSERVER_SCHEMA, metadata=metadata,
+                )
                 summary = str(raw.get("summary", "")).strip()[:500]
                 if not isinstance(raw.get("healthy"), bool) or not summary:
                     raise ValueError("incomplete observation")
                 concerns = [c for c in (raw.get("concerns") or []) if isinstance(c, str) and c in self.services]
                 obs = {"healthy": raw["healthy"], "summary": summary, "concerns": concerns[:6], "source": "llm"}
+                _record_llm_call(self.llm_session, "observer", metadata)
+                obs["provenance"] = {"source": "Gemini", "llm": metadata}
             except Exception as exc:
+                _record_llm_call(self.llm_session, "observer", metadata, str(exc))
+                obs["provenance"] = {
+                    "source": "rule-based fallback", "fallback_reason": str(exc), "llm": metadata,
+                }
                 print(f"  [Observer agent] LLM observation failed ({exc.__class__.__name__}); using the rules.")
+        elif self.use_llm:
+            obs["fallback_reason"] = (self.llm_session or {}).get(
+                "fallback_reason", "Gemini disabled after an earlier transient failure"
+            )
+            _record_rule_fallback(self.llm_session, "observer", obs["fallback_reason"])
+            obs["provenance"] = {
+                "source": "rule-based fallback", "fallback_reason": obs["fallback_reason"],
+            }
+        else:
+            obs["provenance"] = {"source": "rule-based"}
         obs["probes"] = snap["probes"]
+        obs["cluster"] = snap.get("cluster")
         print(f"  [Observer agent] ({obs['source']}) {'healthy' if obs['healthy'] else 'NOT healthy'}: {obs['summary']}")
         return obs
 
@@ -172,8 +262,9 @@ class ObserverAgent:
 class PlannerAgent:
     """Ranks candidate experiments and picks the next one. One decision per round, so it can react to results."""
 
-    def __init__(self, graph, cfg, mode="auto"):
+    def __init__(self, graph, cfg, mode="auto", llm_session=None):
         self.graph, self.cfg = graph, cfg
+        self.llm_session = llm_session
         if mode not in {"auto", "llm", "rule-based"}:
             raise ValueError(f"Unknown planner mode: {mode}")
         if mode == "llm" and not llm.available(cfg):
@@ -181,28 +272,62 @@ class PlannerAgent:
         self.mode = "llm" if mode == "llm" or (mode == "auto" and llm.available(cfg)) else "rule-based"
         self.avoid = set()        # (service, action) pairs the injector declined
         self.last_ranked = []     # the ranked candidates of the latest decision, for the report
+        self.last_provenance = {"source": "rule-based"}
 
     def decide(self, history, observation=None):
         tested = {(h["service"], h["action"]) for h in history} | self.avoid
         obs = {k: observation[k] for k in ("healthy", "summary", "concerns")} if observation else None
-        if self.mode == "llm":
+        llm_enabled = self.llm_session is None or self.llm_session.get("enabled", True)
+        if self.mode == "llm" and llm_enabled:
+            metadata = {}
             try:
-                p = planner.plan(self.graph, self.cfg, history, RANKED_CANDIDATES, mode="llm", observation=obs)
-            except RuntimeError as exc:
-                if not history and not self.avoid:
+                p = planner.plan(
+                    self.graph, self.cfg, history, RANKED_CANDIDATES, mode="llm",
+                    observation=obs, llm_metadata=metadata,
+                )
+                _record_llm_call(self.llm_session, "planner", metadata)
+                self.last_provenance = {"source": "Gemini", "llm": metadata}
+            except (RuntimeError, ValueError, TypeError) as exc:
+                _record_llm_call(self.llm_session, "planner", metadata, str(exc))
+                malformed_output = isinstance(exc.__cause__, (ValueError, TypeError))
+                if (not _has_transient_cause(exc) and not malformed_output
+                        and "Gemini returned no valid experiments" not in str(exc)):
                     raise                      # first decision: fail loudly (bad key, bad model name)
-                print(f"  [Planner agent] {exc}")
-                p = {"planner": "failed", "experiments": []}   # later rounds: keep the session alive
+                self.last_provenance = {
+                    "source": "rule-based fallback", "fallback_reason": str(exc), "llm": metadata,
+                }
+                print(f"  [Planner agent] {exc}; using the rule-based planner for this and later rounds.")
+                p = {"planner": "failed", "experiments": []}
             ranked = p["experiments"] if p["planner"] == "llm" else []
             chosen = next((x for x in ranked if (x["service"], x["action"]) not in tested), None)
             if chosen:
                 chosen["planner"], chosen["llm_model"] = "llm", p["llm_model"]
+                chosen["planner_provenance"] = self.last_provenance
                 self._remember(ranked, chosen, tested)
                 return chosen
-            print("  [Planner agent] Gemini proposed nothing new; using the rules for this round.")
+            if p["planner"] == "llm":
+                self.last_provenance = {
+                    "source": "rule-based fallback",
+                    "fallback_reason": "Gemini returned no untested candidate for this round.",
+                    "llm": metadata,
+                }
+                print("  [Planner agent] Gemini proposed no untested candidate; using the rules for this round.")
+        elif self.mode == "llm" and self.llm_session and not self.llm_session.get("enabled", True):
+            self.last_provenance = {
+                "source": "rule-based fallback",
+                "fallback_reason": self.llm_session.get(
+                    "fallback_reason", "Gemini disabled after an earlier transient failure"
+                ),
+            }
+            _record_rule_fallback(self.llm_session, "planner", self.last_provenance["fallback_reason"])
+            print(f"  [Planner agent] Gemini unavailable for this session; using rules: "
+                  f"{self.llm_session.get('fallback_reason', 'earlier transient API failure')}")
+        else:
+            self.last_provenance = {"source": "rule-based"}
         chosen = self._decide_by_rules(history, tested, observation)
         if chosen:
             chosen["planner"] = "rule-based"
+            chosen["planner_provenance"] = self.last_provenance
         return chosen
 
     def _remember(self, ranked, chosen, tested):
@@ -275,11 +400,13 @@ class InjectorAgent:
     the go/no-go, duration and rollback decisions, and the code clamps them to the configured limits.
     The safety guard is checked on every probe, before the agent is asked, and cannot be overridden."""
 
-    def __init__(self, cfg, env, baseline, guard, run_dir, use_llm=False):
+    def __init__(self, cfg, env, baseline, guard, run_dir, use_llm=False, llm_session=None):
         self.cfg, self.env, self.baseline, self.guard, self.run_dir = cfg, env, baseline, guard, run_dir
         self.use_llm = use_llm
+        self.llm_session = llm_session
         self.fault_snapshot = None      # cluster state captured while the fault is active
         self._current = None
+        self.rollback_decisions = []
 
     def preflight(self, exp, observation=None):
         """Return (reason to refuse or None, pre-flight probe readings)."""
@@ -302,14 +429,29 @@ class InjectorAgent:
         """Ask the LLM for go/no-go and duration. Returns (inject, duration_s, reason, source)."""
         max_d = int(exp["duration_s"])
         min_d = min(MIN_DURATION_S, max_d)
-        if not self.use_llm:
-            return True, max_d, "pre-flight checks passed", "rule-based"
+        if not self.use_llm or (
+            self.llm_session is not None and not self.llm_session.get("enabled", True)
+        ):
+            fallback = (self.llm_session or {}).get("fallback_reason")
+            if self.use_llm:
+                _record_rule_fallback(
+                    self.llm_session, "injector",
+                    fallback or "Gemini disabled after an earlier transient failure",
+                )
+            reason = "pre-flight checks passed"
+            if fallback:
+                reason += f"; Gemini unavailable: {fallback}"
+            return True, max_d, reason, "rule-based", None
         payload = {"experiment": {k: exp[k] for k in ("service", "action", "rationale")},
                    "preflight_probes": probes, "baseline": self.baseline, "safety_limits": self.guard.limits(),
                    "observation": {k: observation[k] for k in ("healthy", "summary", "concerns")} if observation else None,
                    "earlier_rounds": history, "min_duration_s": min_d, "max_duration_s": max_d}
+        metadata = {}
         try:
-            raw = llm.ask_json(self.cfg, INJECTOR_SYSTEM, payload, max_tokens=400)
+            raw = llm.ask_json(
+                self.cfg, INJECTOR_SYSTEM, payload, max_tokens=400,
+                schema=llm.INJECTOR_SCHEMA, metadata=metadata,
+            )
             inject = raw.get("inject")
             duration = raw.get("duration_s")
             if not isinstance(inject, bool):
@@ -317,10 +459,12 @@ class InjectorAgent:
             if not isinstance(duration, (int, float)) or isinstance(duration, bool):
                 duration = max_d
             duration = int(min(max_d, max(min_d, duration)))     # code enforces the limits
-            return inject, duration, str(raw.get("reason", ""))[:400], "llm"
+            _record_llm_call(self.llm_session, "injector", metadata)
+            return inject, duration, str(raw.get("reason", ""))[:400], "llm", metadata
         except Exception as exc:
+            _record_llm_call(self.llm_session, "injector", metadata, str(exc))
             print(f"  [Injector agent] LLM decision failed ({exc.__class__.__name__}); using the default duration.")
-            return True, max_d, "pre-flight checks passed", "rule-based"
+            return True, max_d, f"pre-flight checks passed; Gemini decision failed: {exc}", "rule-based", metadata
 
     def review(self, readings):
         """Called by the runner while the fault is active. Return a reason to roll back now, or None."""
@@ -331,15 +475,30 @@ class InjectorAgent:
                     self.fault_snapshot = _compact_cluster(diagnostics())
                 except Exception:
                     self.fault_snapshot = None
-        if not self.use_llm:
+        if not self.use_llm or (
+            self.llm_session is not None and not self.llm_session.get("enabled", True)
+        ):
             return None                                  # rule-based mode: only the safety guard stops a fault
         payload = {"experiment": {k: self._current[k] for k in ("service", "action")},
                    "readings": readings, "baseline": self.baseline, "safety_limits": self.guard.limits()}
+        metadata = {}
         try:
-            raw = llm.ask_json(self.cfg, ROLLBACK_SYSTEM, payload, max_tokens=200)
-            if raw.get("rollback") is True:
-                return str(raw.get("reason", "")).strip()[:300] or "the agent decided to roll back"
+            raw = llm.ask_json(
+                self.cfg, ROLLBACK_SYSTEM, payload, max_tokens=200,
+                schema=llm.ROLLBACK_SCHEMA, metadata=metadata,
+            )
+            reason = str(raw.get("reason", "")).strip()[:300]
+            decision = {"rollback": raw.get("rollback") is True, "reason": reason, "source": "llm"}
+            _record_llm_call(self.llm_session, "injector", metadata)
+            self.rollback_decisions.append({**decision, "llm": metadata.copy()})
+            if decision["rollback"]:
+                return reason or "the agent decided to roll back"
         except Exception as exc:
+            _record_llm_call(self.llm_session, "injector", metadata, str(exc))
+            self.rollback_decisions.append({
+                "rollback": False, "reason": str(exc), "source": "rule-based fallback",
+                "llm": metadata.copy(),
+            })
             print(f"  [Injector agent] rollback review failed ({exc.__class__.__name__}); continuing under the safety guard.")
         return None
 
@@ -348,8 +507,27 @@ class InjectorAgent:
         refusal, probes = self.preflight(exp, observation)
         if refusal:
             print(f"  [Injector agent] refused: {refusal}.")
+            exp["injector_decision"] = {
+                "approved": False, "reason": refusal, "source": "safety preflight",
+                "requested_duration_s": exp.get("duration_s"),
+                "actual_duration_s": 0,
+            }
             return None
-        inject, duration, reason, source = self._decide(exp, probes, list(history), observation)
+        requested_duration = exp["duration_s"]
+        inject, duration, reason, source, metadata = self._decide(
+            exp, probes, list(history), observation
+        )
+        exp["injector_decision"] = {
+            "approved": inject,
+            "reason": reason,
+            "source": source,
+            "requested_duration_s": requested_duration,
+            "actual_duration_s": duration if inject else 0,
+            "llm": metadata,
+            "fallback_reason": (
+                reason if source == "rule-based" and self.use_llm else None
+            ),
+        }
         if not inject:
             print(f"  [Injector agent] ({source}) declined to inject: {reason}")
             return "declined"
@@ -357,6 +535,7 @@ class InjectorAgent:
         exp["injector"], exp["injector_reason"] = source, reason
         print(f"  [Injector agent] ({source}) injecting for {duration}s: {reason}")
         self._current, self.fault_snapshot = exp, None
+        self.rollback_decisions = []
         result = None
         for attempt in (1, 2):
             try:
@@ -374,6 +553,8 @@ class InjectorAgent:
                     return "declined"
         result["injector"], result["injector_reason"] = source, reason
         result["fault_observation"] = self.fault_snapshot
+        result["injector_decision"] = exp["injector_decision"]
+        result["rollback_decisions"] = list(self.rollback_decisions)
         if result.get("agent_rollback"):
             print(f"  [Injector agent] ({source}) rolled the fault back early: {result['agent_rollback']}")
         return result
@@ -382,9 +563,10 @@ class InjectorAgent:
 class AnalystAgent:
     """Scores one result (fixed formula), then diagnoses it and recommends fixes."""
 
-    def __init__(self, graph, baseline, cfg=None, use_llm=False):
+    def __init__(self, graph, baseline, cfg=None, use_llm=False, llm_session=None):
         self.nodes, self.baseline = _nodes(graph), baseline
         self.cfg, self.use_llm = cfg, bool(use_llm and cfg)
+        self.llm_session = llm_session
 
     def _rule_fixes(self, result):
         recs = []
@@ -417,8 +599,12 @@ class AnalystAgent:
                                "is_data_store": any(h in node["name"] for h in STATEFUL_HINTS)},
             "rule_based_suggestions": [r["title"] for r in rule_recs],
         }
+        metadata = {}
         try:
-            raw = llm.ask_json(self.cfg, ANALYST_SYSTEM, payload, max_tokens=900)
+            raw = llm.ask_json(
+                self.cfg, ANALYST_SYSTEM, payload, max_tokens=900,
+                schema=llm.ANALYST_SCHEMA, metadata=metadata,
+            )
             diagnosis = str(raw.get("diagnosis", "")).strip()[:800]
             if not diagnosis:
                 raise ValueError("empty diagnosis")
@@ -430,8 +616,27 @@ class AnalystAgent:
                 if isinstance(f, dict) and str(f.get("title", "")).strip():
                     fixes.append({"title": str(f["title"]).strip().rstrip(".")[:160],
                                   "detail": str(f.get("detail", "")).strip()[:600], "source": "llm"})
+            hypotheses = raw.get("root_cause_hypotheses") or []
+            evidence = raw.get("evidence") or []
+            if not isinstance(hypotheses, list) or not isinstance(evidence, list):
+                raise ValueError("root_cause_hypotheses and evidence must be arrays")
+            result["root_cause_hypotheses"] = [
+                str(item).strip()[:400] for item in hypotheses if str(item).strip()
+            ][:4]
+            result["analyst_evidence"] = [
+                str(item).strip()[:400] for item in evidence if str(item).strip()
+            ][:6]
+            _record_llm_call(self.llm_session, "analyst", metadata)
+            result.setdefault("agent_provenance", {})["analyst"] = {
+                "source": "Gemini", "model": metadata.get("model"), "llm": metadata,
+            }
             return diagnosis, severity, fixes
         except Exception as exc:
+            _record_llm_call(self.llm_session, "analyst", metadata, str(exc))
+            result.setdefault("agent_provenance", {})["analyst"] = {
+                "source": "rule-based fallback", "model": metadata.get("model"),
+                "fallback_reason": str(exc), "llm": metadata,
+            }
             print(f"  [Analyst agent] LLM analysis failed ({exc.__class__.__name__}); using the rule-based fixes.")
             return None
 
@@ -440,7 +645,7 @@ class AnalystAgent:
         rule_recs = self._rule_fixes(result)
         result["analyst"], result["recommendations"] = "rule-based", rule_recs
         result["severity"] = _severity_from_score(result["score"])
-        if self.use_llm:
+        if self.use_llm and (self.llm_session is None or self.llm_session.get("enabled", True)):
             answer = self._llm_fixes(result, rule_recs)
             if answer:
                 diagnosis, severity, fixes = answer
@@ -450,6 +655,15 @@ class AnalystAgent:
                                "ai_diagnosis": diagnosis, "ai_severity": severity,
                                "severity": severity or result["severity"],
                                "recommendations": fixes + keep})
+        elif self.use_llm:
+            fallback_reason = (self.llm_session or {}).get(
+                "fallback_reason", "Gemini disabled after an earlier transient failure"
+            )
+            _record_rule_fallback(self.llm_session, "analyst", fallback_reason)
+            result.setdefault("agent_provenance", {})["analyst"] = {
+                "source": "rule-based fallback",
+                "fallback_reason": fallback_reason,
+            }
 
         if result["score"] >= RESILIENT_FROM:
             verdict = "resilient"
@@ -471,8 +685,9 @@ class AnalystAgent:
 class ReporterAgent:
     """Ranks all weaknesses by severity and explains the overall score."""
 
-    def __init__(self, cfg, use_llm=False):
+    def __init__(self, cfg, use_llm=False, llm_session=None):
         self.cfg, self.use_llm = cfg, use_llm
+        self.llm_session = llm_session
 
     @staticmethod
     def _by_rules(done, overall_score):
@@ -489,13 +704,19 @@ class ReporterAgent:
 
     def summarise(self, done, overall_score):
         report = self._by_rules(done, overall_score)
-        if self.use_llm and done:
+        if self.use_llm and done and (
+            self.llm_session is None or self.llm_session.get("enabled", True)
+        ):
             slim = [{k: e.get(k) for k in ("service", "action", "score", "severity", "error_rate", "p95_ms",
                                            "recovery_s", "aborted", "abort_reason", "agent_rollback",
                                            "breakdown", "ai_diagnosis")} for e in done]
+            metadata = {}
             try:
-                raw = llm.ask_json(self.cfg, REPORTER_SYSTEM,
-                                   {"resilience_score": overall_score, "experiments": slim}, max_tokens=900)
+                raw = llm.ask_json(
+                    self.cfg, REPORTER_SYSTEM,
+                    {"resilience_score": overall_score, "experiments": slim},
+                    max_tokens=900, schema=llm.REPORTER_SCHEMA, metadata=metadata,
+                )
                 overall = str(raw.get("overall", "")).strip()[:1200]
                 if not overall:
                     raise ValueError("empty report")
@@ -512,8 +733,24 @@ class ReporterAgent:
                           "score_explanation": str(raw.get("score_explanation", "")).strip()[:500]
                           or report["score_explanation"],
                           "source": "llm", "model": llm.model_name(self.cfg)}
+                _record_llm_call(self.llm_session, "reporter", metadata)
+                report["provenance"] = {"llm": metadata, "source": "Gemini"}
             except Exception as exc:
+                _record_llm_call(self.llm_session, "reporter", metadata, str(exc))
+                report["provenance"] = {
+                    "llm": metadata, "source": "rule-based fallback",
+                    "fallback_reason": str(exc),
+                }
                 print(f"[Reporter agent] LLM report failed ({exc.__class__.__name__}); using the rule-based ranking.")
+        elif self.use_llm and done:
+            fallback_reason = (self.llm_session or {}).get(
+                "fallback_reason", "Gemini disabled after an earlier transient failure"
+            )
+            _record_rule_fallback(self.llm_session, "reporter", fallback_reason)
+            report["provenance"] = {
+                "source": "rule-based fallback",
+                "fallback_reason": fallback_reason,
+            }
         print(f"\n[Reporter agent] ({report['source']}) weaknesses by severity:")
         for i, w in enumerate(report["ranked_weaknesses"], 1):
             print(f"  {i}. {w['severity']}: {ACTION_LABELS.get(w['action'], w['action'])} on {w['service']} "
@@ -566,10 +803,17 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
         os.remove(stop_file)
     planner_agent = PlannerAgent(graph, cfg, planner_mode)
     use_llm = planner_agent.mode == "llm"
-    observer_agent = ObserverAgent(cfg, env, graph, use_llm)
-    injector_agent = InjectorAgent(cfg, env, baseline, guard, run_dir, use_llm)
-    analyst_agent = AnalystAgent(graph, baseline, cfg, use_llm)
-    reporter_agent = ReporterAgent(cfg, use_llm)
+    llm_session = {
+        "enabled": use_llm,
+        "fallback_reason": None,
+        "model": llm.model_name(cfg) if use_llm else None,
+        "calls": [],
+    }
+    planner_agent.llm_session = llm_session
+    observer_agent = ObserverAgent(cfg, env, graph, use_llm, llm_session)
+    injector_agent = InjectorAgent(cfg, env, baseline, guard, run_dir, use_llm, llm_session)
+    analyst_agent = AnalystAgent(graph, baseline, cfg, use_llm, llm_session)
+    reporter_agent = ReporterAgent(cfg, use_llm, llm_session)
     mode = planner_agent.mode
     lg = _langgraph()
     orchestrator = "LangGraph state graph" if lg else "Python loop (LangGraph not installed)"
@@ -601,13 +845,18 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
             print(f"      {r['rank']}. {ACTION_LABELS.get(r['action'], r['action'])} on {r['service']}"
                   + ("  <- chosen" if r["chosen"] else "") + ("  (already tested)" if r["already_tested"] else ""))
         round_log.append({"round": state["round"],
-                          "observation": {k: observation[k] for k in ("healthy", "summary", "concerns", "source")},
+                          "observation": {k: observation[k] for k in
+                                          ("healthy", "summary", "concerns", "source", "provenance",
+                                           "probes", "cluster")},
                           "ranked_candidates": ranked, "outcome": "ran"})
+        round_log[-1]["planner_provenance"] = exp.get("planner_provenance")
         return {"exp": exp, "outcome": "planned"}
 
     def injector_node(state):
         exp = state["exp"]
         result = injector_agent.act(exp, history, state["observation"])
+        if round_log:
+            round_log[-1]["injector_decision"] = exp.get("injector_decision")
         if result is None:
             round_log[-1]["outcome"] = "refused"
             return {"result": None, "outcome": "refused"}
@@ -638,7 +887,7 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
 
     def reporter_node(state):
         final.update(_finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id,
-                             chosen, done, round_log, orchestrator))
+                             chosen, done, round_log, orchestrator, llm_session))
         return {"outcome": "reported"}
 
     # ---------------- routing: which node runs next ----------------
@@ -687,7 +936,8 @@ def agent_graph_mermaid():
     return app.get_graph().draw_mermaid()
 
 
-def _finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id, chosen, done, round_log, orchestrator):
+def _finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id, chosen, done, round_log,
+            orchestrator, llm_session):
     """Reporter step: build the final results dict."""
     sources = {exp["planner"] for exp in chosen}
     planner_label = "agents (" + ", ".join(sorted(sources)) + ")"
@@ -695,6 +945,9 @@ def _finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id, ch
     plan = {"planner": planner_label, "llm_model": llm_model, "experiments": chosen}
     results = {"run_id": run_id, "env": env.name, "planner": plan["planner"], "llm_model": llm_model,
                "baseline": baseline, "rounds": round_log, "orchestrator": orchestrator,
+               "requested_model": llm.model_name(cfg) if planner_agent.mode == "llm" else None,
+               "agent_calls": list(llm_session["calls"]),
+               "llm_fallback_reason": llm_session.get("fallback_reason"),
                "limits": guard.limits(), "plan": plan, "experiments": done, "compare_to": None}
     results["resilience_score"] = round(sum(e["score"] for e in done) / len(done), 1) if done else None
     results["weaknesses"] = [{"service": e["service"], "action": e["action"], "score": e["score"]}
@@ -702,15 +955,35 @@ def _finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id, ch
     ai_report = reporter_agent.summarise(done, results["resilience_score"]) if done else None
     results["ai_report"] = ai_report
     results["summary"] = ai_report["overall"] if ai_report else None
+    results["agent_calls"] = list(llm_session["calls"])
+    results["llm_fallback_reason"] = llm_session.get("fallback_reason")
     if ai_report and ai_report.get("model"):
         results["summary_model"] = ai_report["model"]
 
-    def used(key):
-        return "llm" if any(e.get(key) == "llm" for e in done) else "rule-based"
     results["agents"] = {
-        "observer": "llm" if any(r["observation"]["source"] == "llm" for r in round_log) else "rule-based",
-        "planner": "llm" if "llm" in sources else "rule-based",
-        "injector": used("injector"), "analyst": used("analyst"),
-        "reporter": (ai_report or {}).get("source", "rule-based"),
+        "observer": _agent_call_status(llm_session, "observer"),
+        "planner": _agent_call_status(llm_session, "planner"),
+        "injector": _agent_call_status(llm_session, "injector"),
+        "analyst": _agent_call_status(llm_session, "analyst"),
+        "reporter": _agent_call_status(llm_session, "reporter"),
+    }
+    if ai_report:
+        results["agents"]["reporter"] = (
+            "Gemini" if ai_report.get("source") == "llm"
+            else _agent_call_status(llm_session, "reporter")
+        )
+    results["llm_execution"] = {
+        "requested_mode": planner_agent.mode,
+        "model": llm.model_name(cfg) if planner_agent.mode == "llm" else None,
+        "overall_source": (
+            "Gemini" if any(call["gemini_used"] for call in llm_session["calls"])
+            and not any(call["fallback_used"] for call in llm_session["calls"])
+            else "mixed Gemini + rule-based fallback"
+            if any(call["gemini_used"] for call in llm_session["calls"])
+            else "rule-based"
+        ),
+        "rounds": len(round_log),
+        "completed_experiments": len(done),
+        "fallback_reason": llm_session.get("fallback_reason"),
     }
     return results

@@ -83,7 +83,7 @@ def _validate_llm(raw, graph, cfg, n):
     return picks[:n]
 
 
-def plan(graph, cfg, history=None, n=3, mode="auto", observation=None):
+def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metadata=None):
     if mode not in {"auto", "llm", "rule-based"}:
         raise ValueError(f"Unknown planner mode: {mode}")
     history = history or []
@@ -96,7 +96,12 @@ def plan(graph, cfg, history=None, n=3, mode="auto", observation=None):
                        "already_tested": history, "count": n}
             if observation:
                 payload["observation"] = observation
-            picks = _validate_llm(llm.ask_json(cfg, SYSTEM, payload), graph, cfg, n)
+            picks = _validate_llm(
+                llm.ask_json(
+                    cfg, SYSTEM, payload, schema=llm.PLANNER_SCHEMA, metadata=llm_metadata
+                ),
+                graph, cfg, n,
+            )
             if picks:
                 return {"planner": "llm", "llm_model": llm.model_name(cfg),
                         "experiments": _finalize(picks, graph, cfg)}

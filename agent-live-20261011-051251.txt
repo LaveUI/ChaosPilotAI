@@ -1,0 +1,40 @@
+Agents (llm): observer, planner, injector, analyst, reporter. Orchestrator: LangGraph state graph.
+Safety limits: {'max_error_rate': 0.5, 'p95_limit_ms': 1500, 'max_extra_unhealthy_pods': 3}
+
+=== Round 1 of 1 ===
+  [Observer agent] LLM observation failed (ValueError); using the rules.
+  [Observer agent] (rule-based) healthy: 3 of 3 probes succeeded; 12 of 12 deployments ready; 3 recent warning event(s).
+  [Planner agent] (llm) ranked 5 candidate(s), chose pod failure on productcatalogservice
+      1. pod failure on productcatalogservice  <- chosen
+      2. pod failure on redis-cart
+      3. network delay on cartservice
+      4. CPU stress on checkoutservice
+      5. network delay on currencyservice
+  [Injector agent] (llm) injecting for 30s: The cluster and application are healthy with all preflight probes succeeding and deployments ready. A 30-second duration is sufficient to observe the immediate impact of pod failure on downstream services.
+
+[exp1] pod-failure on productcatalogservice
+  BEFORE: measuring for 15s
+  DURING: injecting controlled failure
+  SAFETY ABORT: error rate 60% exceeded limit 50%
+  Removing injected fault...
+  RECOVERY: checking stabilization
+  AFTER: measuring for 15s
+
+  PHASE COMPARISON
+  BEFORE   errors=0.0 p95=23.26ms samples=15
+  DURING   errors=0.6 p95=5.71ms samples=5
+  RECOVERY errors=0.1429 p95=6.96ms samples=7
+  AFTER    errors=0.0 p95=21.98ms samples=15
+  Returned to baseline: True
+  [Analyst agent] LLM analysis failed (GoogleRateLimitError); using the rule-based fixes.
+  [Analyst agent] (rule-based) productcatalogservice is weak: score 49.2/100, severity high (errors -40.0, latency -0.0, recovery -0.8, abort -10.0)
+      fix (rule-based): Run at least 2 replicas of productcatalogservice
+      fix (rule-based): Add retries with backoff in checkoutservice, frontend, recommendationservice
+      fix (rule-based): Safety limit stopped this experiment
+
+[Reporter agent] (rule-based) weaknesses by severity:
+  1. high: pod failure on productcatalogservice (score 49.2)
+
+Resilience score: 49.2/100
+  weak: pod-failure on productcatalogservice scored 49.2
+Report: runs/20261011-051251-187875/report.html
