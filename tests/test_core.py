@@ -8,7 +8,8 @@ from unittest.mock import patch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from chaosai import analyzer, chaos, config, mapper, planner, report, runner  # noqa: E402
+from chaosai import analyzer, chaos, config, dashboard, mapper, planner, report, runner  # noqa: E402
+from chaosai.cli import _make_run_id  # noqa: E402
 from chaosai.env import SimEnv  # noqa: E402
 from chaosai.guard import Guard  # noqa: E402
 
@@ -164,6 +165,59 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Probe measurements, resilience scores", rendered)
 
 
+class DashboardTests(unittest.TestCase):
+    base = {"error_rate": 0.0, "p95_ms": 100}
+
+    def exp(self, **kw):
+        x = {"id": "exp1", "service": "redis-cart", "action": "pod-failure", "score": 95, "error_rate": 0.0,
+             "p95_ms": 110, "recovered": True, "recovery_s": 2, "aborted": False, "abort_reason": None,
+             "rationale": "test", "breakdown": {"errors": 0, "latency": 0, "recovery": 0, "abort": 0},
+             "samples": [], "recommendations": []}
+        x.update(kw)
+        return x
+
+    def test_severity_levels(self):
+        g = mapper.build_graph(MANIFEST)
+        sev = lambda **kw: dashboard.severity(self.exp(**kw), g, self.base)[0]
+        self.assertEqual(sev(aborted=True, error_rate=1.0, score=20), "critical")
+        self.assertEqual(sev(service="adservice", aborted=True, error_rate=1.0, score=20), "high")
+        self.assertEqual(sev(p95_ms=600, score=85), "high")
+        self.assertEqual(sev(p95_ms=300, score=88), "medium")
+        self.assertEqual(sev(impact={"recovered_to_baseline": False}), "medium")
+        self.assertEqual(sev(), "none")
+
+    def test_weakness_without_analyzer_fix_gets_one(self):
+        g = mapper.build_graph(MANIFEST)
+        x = self.exp(service="shippingservice", action="cpu-stress", p95_ms=380, score=90,
+                     impact={"recovered_to_baseline": False})
+        recs, added = dashboard.effective_recs(x, g, self.base, "medium")
+        self.assertTrue(added)
+        self.assertTrue(any("autoscaler" in r["title"] for r in recs))
+        self.assertTrue(any("lingering" in r["title"] for r in recs))
+
+    def test_all_failed_has_no_latency_ratio(self):
+        x = self.exp(error_rate=1.0, p95_ms=0)
+        self.assertIsNone(dashboard.latency_ratio(x, self.base))
+
+    def test_render_has_every_section_without_ai(self):
+        g = mapper.build_graph(MANIFEST)
+        rec = {"title": "Run at least 2 replicas of redis-cart", "detail": "single point of failure",
+               "auto_fix": {"type": "scale", "service": "redis-cart", "replicas": 2}}
+        run = {"run_id": "r1", "env": "simulated", "planner": "rule-based", "resilience_score": 40.0,
+               "baseline": self.base, "limits": {"max_error_rate": 0.5, "p95_limit_ms": 1500,
+                                                 "max_extra_unhealthy_pods": 3},
+               "experiments": [self.exp(aborted=True, error_rate=1.0, score=20, abort_reason="error rate",
+                                        recommendations=[rec])]}
+        pages = dashboard.render([run], g, config.load(None))
+        self.assertEqual(list(pages), ["dashboard.html"])
+        page = pages["dashboard.html"]
+        for text in ("Resilience Command Center", "redis-cart", "Run at least 2 replicas of redis-cart",
+                     "Generated from measurements", "Experiment Lab", "Fix Recommendations"):
+            self.assertIn(text, page)
+        self.assertNotIn("Coverage across all runs", page)
+        self.assertNotIn("Resilience over time", page)
+
+
 class SimulatedRunTests(unittest.TestCase):
     def run_one(self, replicas):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +241,7 @@ class SimulatedRunTests(unittest.TestCase):
         self.assertGreater(after["score"], before["score"])
 
     def test_run_ids_are_unique(self):
-        ids = {datetime.now().strftime("%Y%m%d-%H%M%S-%f") for _ in range(10)}
+        ids = {_make_run_id() for _ in range(10)}
         self.assertEqual(len(ids), 10)
 
 

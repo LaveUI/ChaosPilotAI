@@ -2,11 +2,16 @@ import argparse
 import json
 import os
 import time
+import uuid
 from datetime import datetime
 
 from . import analyzer, config, mapper, planner, report, runner
 from .chaos import ACTION_LABELS
 from .env import make_env
+
+
+def _make_run_id():
+    return f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{uuid.uuid4().hex[:8]}"
 
 
 def _load(path, what):
@@ -20,7 +25,7 @@ def _save(path, data):
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
@@ -48,7 +53,7 @@ def cmd_map(a, cfg):
         path = "sample/kubernetes-manifests.yaml"
     graph = mapper.build_graph(path, cfg["graph_overrides"])
     _save(cfg["graph_file"], graph)
-    with open("graph.mmd", "w") as f:
+    with open("graph.mmd", "w", encoding="utf-8") as f:
         f.write(mapper.to_mermaid(graph))
     sim_state = os.path.join(cfg["runs_dir"], "sim_state.json")
     if os.path.exists(sim_state):
@@ -90,7 +95,7 @@ def cmd_plan(a, cfg):
 def _execute(cfg, sim, plan, compare_to=None):
     graph, baseline = _graph(cfg), _baseline(cfg)
     env = make_env(cfg, graph, sim)
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    run_id = _make_run_id()
     run_dir = os.path.join(cfg["runs_dir"], run_id)
     done, limits = runner.run_plan(plan, cfg, env, baseline, run_dir, os.path.join(cfg["runs_dir"], "STOP"))
     results = {"run_id": run_id, "env": env.name, "planner": plan["planner"],
@@ -101,9 +106,9 @@ def _execute(cfg, sim, plan, compare_to=None):
     analyzer.analyze(results, graph, baseline, cfg)
     _save(os.path.join(run_dir, "results.json"), results)
     previous = _load(_results_path(cfg, compare_to), "") if compare_to else None
-    with open(os.path.join(run_dir, "report.html"), "w") as f:
+    with open(os.path.join(run_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(report.render(results, graph, previous))
-    with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w") as f:
+    with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w", encoding="utf-8") as f:
         f.write(run_id)
     print(f"\nResilience score: {results['resilience_score']}/100"
           + (f" (was {previous['resilience_score']})" if previous else ""))
@@ -153,7 +158,7 @@ def cmd_report(a, cfg):
     results = _load(_results_path(cfg, run_id), "")
     prev = _load(_results_path(cfg, results["compare_to"]), "") if results.get("compare_to") else None
     out = os.path.join(cfg["runs_dir"], run_id, "report.html")
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         f.write(report.render(results, _graph(cfg), prev))
     print(f"Wrote {out}")
 
@@ -161,7 +166,7 @@ def cmd_agent(a, cfg):
     from . import agents
     graph, baseline = _graph(cfg), _baseline(cfg)
     env = make_env(cfg, graph, a.sim)
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    run_id = _make_run_id()
     run_dir = os.path.join(cfg["runs_dir"], run_id)
     try:
         results = agents.run_agents(cfg, env, graph, baseline, a.rounds, run_id, run_dir,
@@ -171,18 +176,26 @@ def cmd_agent(a, cfg):
     if not results["experiments"]:
         raise SystemExit("No experiments completed.")
     _save(os.path.join(run_dir, "results.json"), results)
-    with open(os.path.join(run_dir, "report.html"), "w") as f:
+    with open(os.path.join(run_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(report.render(results, graph, None))
-    with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w") as f:
+    with open(os.path.join(cfg["runs_dir"], "latest.txt"), "w", encoding="utf-8") as f:
         f.write(run_id)
     print(f"\nResilience score: {results['resilience_score']}/100")
     for w in results["weaknesses"]:
         print(f"  weak: {w['action']} on {w['service']} scored {w['score']}")
     print(f"Report: {os.path.join(run_dir, 'report.html')}")
 
+def cmd_dashboard(a, cfg):
+    from . import dashboard
+    out = a.out or os.path.join(cfg["runs_dir"], "dashboard.html")
+    path, n, used_ai = dashboard.build(cfg, _graph(cfg), out, use_ai=not a.no_ai)
+    print(f"Dashboard built from {n} run(s)" + (" with Gemini explanations" if used_ai else "") + f": {path}")
+
+
 def cmd_kill(a, cfg):
     os.makedirs(cfg["runs_dir"], exist_ok=True)
-    open(os.path.join(cfg["runs_dir"], "STOP"), "w").close()
+    with open(os.path.join(cfg["runs_dir"], "STOP"), "w", encoding="utf-8"):
+        pass
     print("STOP file created: a running session will abort at its next check.")
     graph = _graph(cfg) if a.sim else None
     print(make_env(cfg, graph, a.sim).delete_all_chaos().strip() or "No chaosai experiments were active.")
@@ -212,8 +225,12 @@ def main(argv=None):
     ag.add_argument("--rounds", type=int, default=3)
     ag.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
+    db = sub.add_parser("dashboard", help="build one dashboard from every run: findings, severity, fixes, score")
+    db.add_argument("--out", help="output file (default: runs/dashboard.html)")
+    db.add_argument("--no-ai", action="store_true", help="skip Gemini explanations even if a key is set")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,
-     "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "kill": cmd_kill}[a.cmd](a, cfg)
+     "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "dashboard": cmd_dashboard,
+     "kill": cmd_kill}[a.cmd](a, cfg)
