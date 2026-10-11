@@ -800,7 +800,8 @@ def _langgraph():
         return None
 
 
-def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, planner_mode="auto"):
+def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, planner_mode="auto",
+               clear_stop=True):
     """Run the agent graph: Observer -> Planner -> Injector -> Analyst, repeated, then the Reporter.
 
     The five agents are nodes of a LangGraph StateGraph. If LangGraph is not installed, the same
@@ -810,7 +811,7 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
     if planner_mode == "local":
         cfg = llm.with_provider(cfg, "ollama")
     guard = Guard(cfg, baseline, stop_file)
-    if os.path.exists(stop_file):
+    if clear_stop and os.path.exists(stop_file):
         os.remove(stop_file)
     planner_agent = PlannerAgent(graph, cfg, planner_mode)
     use_llm = planner_agent.mode == "llm"

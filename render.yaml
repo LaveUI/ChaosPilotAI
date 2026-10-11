@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: chaospilot-demo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m chaosai --sim dashboard --public-sim --port $PORT
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: CHAOSPILOT_DASHBOARD_PASSWORD
+        sync: false

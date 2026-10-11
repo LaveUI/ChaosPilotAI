@@ -1,7 +1,9 @@
+import base64
 import os
 import json
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -9,7 +11,7 @@ from unittest.mock import patch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from chaosai import analyzer, chaos, config, mapper, planner, report, runner  # noqa: E402
+from chaosai import analyzer, chaos, config, dashboard, mapper, planner, report, runner  # noqa: E402
 from chaosai.env import SimEnv  # noqa: E402
 from chaosai.guard import Guard  # noqa: E402
 
@@ -62,6 +64,125 @@ class ChaosTests(unittest.TestCase):
                          config.load(None))
 
 
+class DashboardTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config.load(None)
+        self.graph = mapper.build_graph(MANIFEST)
+
+    def test_dashboard_features_have_separate_navigable_pages(self):
+        path = os.path.join(ROOT, "chaosai", "dashboard.html")
+        with open(path, encoding="utf-8") as source:
+            page = source.read()
+
+        for name in ("overview", "services", "experiments", "agents", "findings", "history"):
+            with self.subTest(page=name):
+                self.assertIn(f'id="page-{name}" data-page="{name}"', page)
+                self.assertIn(f'href="#{name}" data-page-link="{name}"', page)
+
+    def test_public_simulation_requires_password_and_never_allows_live_mode(self):
+        with self.assertRaisesRegex(ValueError, "Pass --sim"):
+            dashboard.serve(self.cfg, sim=False, public_sim=True)
+        with patch.dict(os.environ, {"CHAOSPILOT_DASHBOARD_PASSWORD": "short"}):
+            with self.assertRaisesRegex(ValueError, "at least 16 characters"):
+                dashboard.serve(self.cfg, sim=True, public_sim=True)
+
+    def test_public_simulation_auth_and_origin_checks(self):
+        password = "render-demo-password-123"
+        valid = "Basic " + base64.b64encode(f"chaospilot:{password}".encode()).decode()
+        self.assertTrue(dashboard._valid_basic_credentials(valid, password))
+        self.assertFalse(dashboard._valid_basic_credentials(valid, "different-password"))
+        self.assertFalse(dashboard._valid_basic_credentials("Basic not-base64", password))
+        self.assertTrue(dashboard._same_origin("https://app.onrender.com", "app.onrender.com"))
+        self.assertFalse(dashboard._same_origin("https://attacker.example", "app.onrender.com"))
+
+    def test_dashboard_experiment_uses_allowlist_and_protected_services(self):
+        exp = dashboard.validate_experiment(
+            {"service": "cartservice", "action": "pod-failure", "duration_s": 30},
+            self.graph, self.cfg,
+        )
+        self.assertEqual(exp["app_label"], "cartservice")
+        self.assertEqual(exp["duration_s"], 30)
+
+        for payload in (
+            {"service": "frontend", "action": "pod-failure", "duration_s": 30},
+            {"service": "cartservice", "action": "delete-service", "duration_s": 30},
+            {"service": "cartservice", "action": "pod-failure", "duration_s": 14},
+            {"service": "cartservice", "action": "pod-failure", "duration_s": 61},
+            {"service": ["cartservice"], "action": "pod-failure", "duration_s": 30},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                dashboard.validate_experiment(payload, self.graph, self.cfg)
+
+    def test_dashboard_only_exposes_safe_stateless_fix_recommendations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cfg["runs_dir"] = tmp
+            self.cfg["graph_file"] = os.path.join(tmp, "graph.json")
+            runtime = dashboard.DashboardRuntime(self.cfg, sim=True)
+            results = {"experiments": [{"recommendations": [
+                {"title": "Scale cartservice", "auto_fix": {
+                    "type": "scale", "service": "cartservice", "replicas": 2,
+                }},
+                {"title": "Scale protected frontend", "auto_fix": {
+                    "type": "scale", "service": "frontend", "replicas": 2,
+                }},
+                {"title": "Scale stateful store", "auto_fix": {
+                    "type": "scale", "service": "redis-cart", "replicas": 2,
+                }},
+            ]}]}
+            fixes = runtime._collect_safe_fixes(results)
+
+        self.assertEqual(len(fixes), 1)
+        self.assertEqual(fixes[0][1], {"service": "cartservice", "replicas": 2})
+
+    def test_simulator_dashboard_reports_services_without_cluster_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cfg["runs_dir"] = tmp
+            self.cfg["graph_file"] = os.path.join(tmp, "graph.json")
+            self.cfg["baseline_file"] = os.path.join(tmp, "baseline.json")
+            runtime = dashboard.DashboardRuntime(self.cfg, sim=True)
+            state = runtime.state()
+
+        self.assertEqual(state["mode"], "simulated")
+        self.assertTrue(state["connected"])
+        self.assertEqual(len(state["services"]), len(self.graph["nodes"]))
+        self.assertIn("pod-failure", [action["id"] for action in state["actions"]])
+        self.assertIn("frontend", state["protected_services"])
+
+    def test_simulator_dashboard_runs_and_saves_baseline_and_experiment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cfg["runs_dir"] = tmp
+            self.cfg["graph_file"] = os.path.join(tmp, "graph.json")
+            self.cfg["baseline_file"] = os.path.join(tmp, "baseline.json")
+            self.cfg["phase_before_seconds"] = 1
+            self.cfg["phase_after_seconds"] = 1
+            self.cfg["recovery_timeout_s"] = 5
+            self.cfg["llm"]["enabled"] = False
+            runtime = dashboard.DashboardRuntime(self.cfg, sim=True)
+
+            runtime.start_baseline(5)
+            self._wait_for_job(runtime)
+            self.assertEqual(runtime.job["state"], "completed", runtime.job["error"])
+            self.assertTrue(os.path.isfile(self.cfg["baseline_file"]))
+
+            runtime.start_experiment(
+                {"service": "cartservice", "action": "pod-failure", "duration_s": 15}
+            )
+            self._wait_for_job(runtime)
+            self.assertEqual(runtime.job["state"], "completed", runtime.job["error"])
+            run_id = runtime.job["run_id"]
+            self.assertTrue(os.path.isfile(os.path.join(tmp, run_id, "results.json")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, run_id, "report.html")))
+
+    @staticmethod
+    def _wait_for_job(runtime):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if runtime.job["state"] in {"completed", "failed"}:
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"Dashboard operation timed out: {runtime.job}")
+
+
 class GuardTests(unittest.TestCase):
     def test_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +194,16 @@ class GuardTests(unittest.TestCase):
             self.assertIn("blast radius", g.check(0.0, 100, 9))
             open(stop, "w").close()
             self.assertIn("manual", g.check(0.0, 100, 0))
+
+    def test_baseline_collection_observes_dashboard_stop_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = cfg_in(tmp)
+            graph = mapper.build_graph(MANIFEST)
+            env = SimEnv(cfg, graph)
+            stop_file = os.path.join(tmp, "STOP")
+            open(stop_file, "w").close()
+            with self.assertRaisesRegex(RuntimeError, "Manual stop requested"):
+                runner.measure_baseline(cfg, env, 10, stop_file)
 
 
 class ScoreTests(unittest.TestCase):

@@ -201,6 +201,12 @@ def cmd_monitor(a, cfg):
         print("\nLocal monitor stopped.")
 
 
+def cmd_dashboard(a, cfg):
+    from .dashboard import serve
+
+    serve(cfg, sim=a.sim, port=a.port, public_sim=a.public_sim)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="chaosai", description="AI-driven chaos engineering")
     p.add_argument("--config", default="config.yaml")
@@ -227,8 +233,12 @@ def main(argv=None):
                     help="planner selection (default: auto, using Gemini when available)")
     sub.add_parser("monitor", help="watch a live cluster and diagnose manually injected faults with local Ollama")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
+    db = sub.add_parser("dashboard", help="open the local web control dashboard")
+    db.add_argument("--port", type=int, default=8765)
+    db.add_argument("--public-sim", action="store_true",
+                    help="serve the password-protected simulator publicly; requires --sim")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,
      "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "monitor": cmd_monitor,
-     "kill": cmd_kill}[a.cmd](a, cfg)
+     "kill": cmd_kill, "dashboard": cmd_dashboard}[a.cmd](a, cfg)

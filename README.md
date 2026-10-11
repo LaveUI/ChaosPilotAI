@@ -67,6 +67,13 @@ All five are in `chaosai/agents.py`. They are nodes of one LangGraph state graph
 Every answer from the model is validated against the allowlist, the dependency map and the protected
 services before anything runs.
 
+This is not complete knowledge of the website. The Observer sees the configured HTTP probes and
+Kubernetes snapshots (deployments, pods, restarts, warning events, and selected logs); the Planner
+also gets the dependency map and earlier experiment results. The agents do not automatically inspect
+every browser interaction, database query, distributed trace, cloud metric, or business outcome.
+Model-based explanations are limited to the evidence passed into that run, and rule-based mode
+does not use an LLM at all.
+
 ### Rule-based mode
 
 Each agent also has a rule-based version of its decision, so the same pipeline runs without a model:
@@ -179,6 +186,48 @@ python3 -m chaosai fix        # applies the safe automatic fixes from the last r
 python3 -m chaosai rerun      # repeats the same experiments and compares the scores
 ```
 
+### 5. Use the interactive control dashboard
+
+Start the dashboard once, then use its browser controls for baseline measurement, allowlisted
+fault experiments, agent runs, validated safe fixes, safe stop, and emergency cleanup:
+
+```bash
+python3 -m chaosai dashboard
+```
+
+Open `http://127.0.0.1:8765`. For a no-cluster UI demo, start it in simulator mode instead:
+
+```bash
+python3 -m chaosai --sim dashboard
+```
+
+Measure a baseline before starting a fault experiment or agent run. The dashboard shows probe
+success and latency, mapped service health, deployment readiness, warning events, current agent
+activity, experiment outcomes, and saved run history. Live metrics are limited to the URLs in
+`target_urls` and Kubernetes data already collected by ChaosPilot; this is not a replacement for
+application tracing, business metrics, or CPU/memory monitoring.
+
+The normal dashboard binds to loopback only and must not be exposed directly to the public internet.
+The Render Blueprint in `render.yaml` deploys a **simulation-only** dashboard protected by HTTP
+Basic Authentication; it cannot connect to Kubernetes or inject real faults.
+
+### Deploy the simulator to Render
+
+1. Push this repository, including `render.yaml`, to GitHub.
+2. In Render, choose **New → Blueprint**, connect `LaveUI/ChaosPilotAI`, and deploy the Blueprint.
+3. When prompted, set `CHAOSPILOT_DASHBOARD_PASSWORD` to a unique password of at least 16 characters.
+4. Open the deployed `onrender.com` URL. Sign in with username `chaospilot` and the password you set.
+
+Render builds with `pip install -r requirements.txt` and starts
+`python -m chaosai --sim dashboard --public-sim --port $PORT`. The free web service may spin down
+when idle, and its local run history is temporary. Use an upgraded plan and persistent storage if
+you need the demo's history to survive restarts.
+
+A public live control plane is not included. A free hosted web service cannot reach a Kubernetes
+cluster running on your laptop. To control a real cluster remotely, first deploy an authenticated,
+narrowly permissioned cluster-side connector with a private outbound connection; do not expose the
+Kubernetes API or the local control dashboard directly to the public internet.
+
 ## Commands
 
 | Command | What it does |
@@ -192,6 +241,7 @@ python3 -m chaosai rerun      # repeats the same experiments and compares the sc
 | `kill` | Panic button: stops the session and deletes all chaosai faults |
 | `plan --n N`, `run` | Without the agent loop: save a fixed list of experiments, then run it |
 | `monitor` | Separate watcher: diagnoses faults you inject yourself, using a local Ollama model |
+| `dashboard` | Open the local browser control dashboard |
 
 Add `--sim` before the command to use the offline simulator.
 
@@ -214,7 +264,7 @@ duration, never below 15 seconds.
 4. **Pre-flight check.** The Injector refuses to start if the app is unhealthy, and the Planner never targets a service the Observer reported as unhealthy.
 5. **Automatic abort** on rolling error rate, p95 latency or newly unhealthy pods (`safety:` in `config.yaml`). The time taken to remove the fault is measured.
 6. **Agent rollback.** While a fault is active the Injector reviews the readings and can remove it early. The abort in step 5 is checked first and cannot be overridden.
-7. **Manual kill switch.** Ctrl+C, `python3 -m chaosai kill`, or `touch runs/STOP`. The fault is always deleted in a `finally` block.
+7. **Manual kill switch.** Ctrl+C, `python3 -m chaosai kill`, `touch runs/STOP`, or the dashboard's **Stop safely** and **Emergency stop** buttons. The active fault is removed in a `finally` block.
 
 To rehearse the abort, use the strict limits in `config-safety-test.yaml`:
 `python3 -m chaosai --config config-safety-test.yaml agent --rounds 1`.
@@ -278,6 +328,8 @@ chaosai/
   report.py       self-contained HTML report
   env.py          KubeEnv (real cluster) and SimEnv (offline simulator)
   local_agent.py  the separate `monitor` command (local Ollama)
+  dashboard.py   local API and simulation-only authenticated public mode
+  dashboard.html multi-page control UI for overview, services, experiments, agents, findings and history
   config.py       defaults, merged with config.yaml
   cli.py          commands
 tests/            38 unit tests

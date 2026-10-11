@@ -60,13 +60,15 @@ def phase_stats(samples):
     }
 
 
-def collect_phase(env, cfg, seconds, phase, origin):
+def collect_phase(env, cfg, seconds, phase, origin, stop_file=None):
     """Collect probe samples for a fixed observation window."""
 
     samples = []
     end = env.now() + seconds
 
     while env.now() < end:
+        if stop_file and os.path.exists(stop_file):
+            raise RuntimeError("Manual stop requested during baseline measurement.")
         ok, ms = env.probe()
 
         samples.append([
@@ -81,11 +83,11 @@ def collect_phase(env, cfg, seconds, phase, origin):
     return samples
 
 
-def measure_baseline(cfg, env, seconds):
+def measure_baseline(cfg, env, seconds, stop_file=None):
     """Preserve the existing baseline CLI interface."""
 
     samples = collect_phase(
-        env, cfg, seconds, "before", env.now()
+        env, cfg, seconds, "before", env.now(), stop_file
     )
 
     stats = phase_stats(samples)
