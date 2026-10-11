@@ -1,4 +1,4 @@
-"""Optional Gemini client with structured JSON output and bounded transient retries."""
+"""Structured JSON clients for Gemini and local Ollama models."""
 from datetime import datetime, timezone
 import email.utils
 import json
@@ -6,6 +6,8 @@ import os
 import random
 import re
 import time
+import urllib.error
+import urllib.request
 
 
 MAX_ATTEMPTS = 3
@@ -104,12 +106,26 @@ SUMMARY_SCHEMA = {
 }
 
 
+def with_provider(cfg, provider):
+    configured = dict(cfg)
+    configured["llm"] = {**cfg["llm"], "provider": provider}
+    return configured
+
+
+def provider_name(cfg):
+    return "Ollama" if cfg.get("llm", {}).get("provider") == "ollama" else "Gemini"
+
+
 def model_name(cfg):
+    if cfg.get("llm", {}).get("provider") == "ollama":
+        return cfg["local_agent"]["model"]
     return os.environ.get("CHAOSAI_MODEL", cfg["llm"]["model"])
 
 
-def backend():
+def backend(cfg=None):
     """Which client library is installed: "langchain", "google-genai" or None."""
+    if cfg and cfg.get("llm", {}).get("provider") == "ollama":
+        return "ollama"
     forced = os.environ.get("CHAOSAI_LLM_BACKEND")
     if forced != "google-genai":
         try:
@@ -125,21 +141,23 @@ def backend():
 
 
 def available(cfg):
-    if not cfg["llm"]["enabled"] or not os.environ.get("GEMINI_API_KEY"):
+    if not cfg["llm"]["enabled"]:
         return False
-    return backend() is not None
+    if cfg.get("llm", {}).get("provider") == "ollama":
+        return True
+    return bool(os.environ.get("GEMINI_API_KEY")) and backend(cfg) is not None
 
 
 def _parse(text):
     if not isinstance(text, str) or not text.strip():
-        raise ValueError("Gemini returned an empty response.")
+        raise ValueError("The model returned an empty response.")
     content = text.strip()
     fenced = re.fullmatch(r"```\s*(?:json\s*)?(.*?)\s*```", content, flags=re.IGNORECASE | re.DOTALL)
     if fenced:
         content = fenced.group(1).strip()
     value = json.loads(content)
     if not isinstance(value, dict):
-        raise ValueError("Gemini JSON response must be an object.")
+        raise ValueError("Model JSON response must be an object.")
     return value
 
 
@@ -181,6 +199,57 @@ def _ask_google_genai(cfg, system, payload, max_tokens, schema):
         ),
     )
     return _parse(response.text)
+
+
+def _ask_ollama(cfg, system, payload, max_tokens, schema):
+    from .local_agent import _endpoint
+
+    settings = cfg["local_agent"]
+    request_payload = {
+        "model": settings["model"],
+        "stream": False,
+        "format": schema or "json",
+        "keep_alive": settings["keep_alive"],
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+        "options": {
+            "temperature": 0.2,
+            "num_ctx": settings["num_ctx"],
+            "num_predict": max_tokens,
+        },
+    }
+    request = urllib.request.Request(
+        _endpoint(settings["ollama_url"]),
+        data=json.dumps(request_payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings["ollama_timeout_s"]) as response:
+            body = json.loads(response.read().decode())
+        if not isinstance(body, dict):
+            raise RuntimeError("Ollama returned an invalid response.")
+        if body.get("error"):
+            raise RuntimeError(f"Ollama request failed: {str(body['error'])[:500]}")
+        content = body.get("message", {}).get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("Ollama response is missing message content.")
+        try:
+            return _parse(content)
+        except (TypeError, ValueError) as exc:
+            reason = body.get("done_reason", "unknown")
+            raise RuntimeError(f"Ollama returned invalid JSON (finish reason: {reason}).") from exc
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"Ollama HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Cannot reach local Ollama: {exc.reason}. Start Ollama and pull {settings['model']}."
+        ) from exc
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Ollama returned a malformed response.") from exc
 
 
 def _status_code(exc):
@@ -253,14 +322,14 @@ def _request_delay(exc, retry_number):
 
 
 def ask_json(cfg, system, payload, max_tokens=1500, schema=None, metadata=None):
-    """Call Gemini with JSON schema output and at most three attempts for transient errors.
+    """Call the selected model with JSON schema output.
 
     If Retry-After exceeds the bounded retry window, the call fails immediately rather than
     retrying before the server says it is safe or sleeping for an unbounded time.
     """
     details = metadata if metadata is not None else {}
     details.update({
-        "provider": "Gemini",
+        "provider": provider_name(cfg),
         "model": model_name(cfg),
         "requested": True,
         "succeeded": False,
@@ -268,7 +337,7 @@ def ask_json(cfg, system, payload, max_tokens=1500, schema=None, metadata=None):
         "retry_count": 0,
     })
     started = time.monotonic()
-    selected_backend = backend()
+    selected_backend = backend(cfg)
     details["backend"] = selected_backend
     try:
         if selected_backend is None:
@@ -278,6 +347,8 @@ def ask_json(cfg, system, payload, max_tokens=1500, schema=None, metadata=None):
             try:
                 if selected_backend == "langchain":
                     result = _ask_langchain(cfg, system, payload, max_tokens, request_schema)
+                elif selected_backend == "ollama":
+                    result = _ask_ollama(cfg, system, payload, max_tokens, request_schema)
                 else:
                     result = _ask_google_genai(cfg, system, payload, max_tokens, request_schema)
                 details["succeeded"] = True

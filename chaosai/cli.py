@@ -211,7 +211,7 @@ def main(argv=None):
     b.add_argument("--seconds", type=int)
     pl = sub.add_parser("plan", help="choose experiments (LLM if configured, else rule-based)")
     pl.add_argument("--n", type=int, default=3)
-    pl.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+    pl.add_argument("--planner", choices=("auto", "llm", "local", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
     pl.add_argument("--avoid-tested", action="store_true", help="deprioritize pairs from the latest run")
     r = sub.add_parser("run", help="run a plan with safety limits, then score and report")
@@ -223,7 +223,7 @@ def main(argv=None):
     rp.add_argument("--run")
     ag = sub.add_parser("agent", help="agent loop: plan, inject and analyze one experiment per round")
     ag.add_argument("--rounds", type=int, default=3)
-    ag.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+    ag.add_argument("--planner", choices=("auto", "llm", "local", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
     sub.add_parser("monitor", help="watch a live cluster and diagnose manually injected faults with local Ollama")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")

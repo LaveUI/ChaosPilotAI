@@ -84,12 +84,17 @@ def _validate_llm(raw, graph, cfg, n):
 
 
 def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metadata=None):
-    if mode not in {"auto", "llm", "rule-based"}:
+    if mode not in {"auto", "llm", "local", "rule-based"}:
         raise ValueError(f"Unknown planner mode: {mode}")
+    if mode == "local":
+        cfg = llm.with_provider(cfg, "ollama")
     history = history or []
-    use_llm = mode == "llm" or (mode == "auto" and llm.available(cfg))
-    if mode == "llm" and not llm.available(cfg):
-        raise RuntimeError("LLM planner selected, but Gemini is unavailable. Set GEMINI_API_KEY and install google-genai.")
+    explicit_llm = mode in {"llm", "local"}
+    use_llm = explicit_llm or (mode == "auto" and llm.available(cfg))
+    if explicit_llm and not llm.available(cfg):
+        if llm.provider_name(cfg) == "Ollama":
+            raise RuntimeError("Ollama planner is unavailable. Start the local Ollama service.")
+        raise RuntimeError("Gemini is unavailable. Set GEMINI_API_KEY and install google-genai.")
     if use_llm:
         try:
             payload = {"graph": graph, "allowlist": cfg["allowlist"], "excluded": cfg["exclude_services"],
@@ -105,11 +110,11 @@ def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metad
             if picks:
                 return {"planner": "llm", "llm_model": llm.model_name(cfg),
                         "experiments": _finalize(picks, graph, cfg)}
-            if mode == "llm":
-                raise RuntimeError("Gemini returned no valid experiments.")
+            if explicit_llm:
+                raise RuntimeError(f"{llm.provider_name(cfg)} returned no valid experiments.")
             print("LLM returned no valid experiments; using rule-based planner.")
         except Exception as exc:
-            if mode == "llm":
+            if explicit_llm:
                 raise RuntimeError(f"LLM planner failed ({exc.__class__.__name__}): {exc}") from exc
             print(f"LLM planner failed ({exc.__class__.__name__}); using rule-based planner.")
     return {"planner": "rule-based", "experiments": _finalize(heuristic_plan(graph, cfg, history, n), graph, cfg)}

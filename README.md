@@ -13,7 +13,7 @@ Built for the Bosch hackathon problem statement "AI-Driven Chaos Engineering for
 | Sandbox | Local Kubernetes cluster with [kind](https://kind.sigs.k8s.io/) |
 | Fault injection | [Chaos Mesh](https://chaos-mesh.org/), driven by the Injector agent |
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) state graph |
-| LLM | Google Gemini through LangChain (`langchain-google-genai`) |
+| LLM | Google Gemini or local Ollama |
 | Language | Python 3.10+ |
 
 ## How it works
@@ -56,7 +56,7 @@ All five are in `chaosai/agents.py`. They are nodes of one LangGraph state graph
 
 ### What the AI decides and what the code decides
 
-| Decided by the agents (Gemini) | Always decided by code |
+| Decided by the selected model | Always decided by code |
 |---|---|
 | What to observe and how to describe it | Probe measurements, error rates and latency |
 | Which service to break, with which fault, in what order | Which faults exist (the allowlist) and which services are protected |
@@ -73,7 +73,7 @@ Each agent also has a rule-based version of its decision, so the same pipeline r
 `--planner rule-based`. For example, the Planner scores every allowed service and fault pair: +3 per
 service relying on it, +4 for a single replica, +5 for a fault type not tried yet, -3 per earlier
 test on that service, -6 if the service is already confirmed weak. The report always states, per
-agent, whether a decision came from Gemini or from the rules.
+agent, whether a decision came from the selected model or from the rules.
 
 ## Dependency map
 
@@ -165,9 +165,12 @@ The first output line names the agents and the orchestrator, for example
 |---|---|
 | `auto` (default) | Gemini when a key is set, otherwise the rules |
 | `llm` | Gemini; the run stops at the start if no key or client library is found |
+| `local` | Local Ollama model configured under `local_agent`; no API key required |
 | `rule-based` | Rules only, no model calls |
 
-The model name comes from `llm.model` in `config.yaml`; override it with `CHAOSAI_MODEL`.
+For local mode, start Ollama and pull the configured model (default: `ollama pull qwen2.5:3b`), then run
+`python3 -u -m chaosai agent --rounds 1 --planner local`. The model name comes from
+`local_agent.model` in `config.yaml`. Gemini uses `llm.model`; override it with `CHAOSAI_MODEL`.
 
 ### 4. Apply a fix and verify it
 
@@ -236,7 +239,7 @@ Each run writes `runs/<id>/report.html` (self-contained, works offline) and `res
 
 - the overall resilience score and the run's key numbers
 - a score bar for every experiment, the points lost by cause, and the findings by severity
-- which agents ran, and whether each decision came from Gemini or the rules
+- which agents ran, and whether each decision came from the selected model or the rules
 - for each round: what the Observer saw and the Planner's ranked candidates
 - the Reporter's weaknesses ranked by severity and its explanation of the score
 - the recommended fixes, and the before/after comparison once `fix` and `rerun` have been used
@@ -257,6 +260,7 @@ Settings are in `config.yaml`; every key is optional.
 | `safety` | Abort thresholds |
 | `agent_review_every_samples` | How often the Injector reviews a running fault (in probes) |
 | `llm.model` | Gemini model name |
+| `local_agent.model`, `local_agent.ollama_url` | Local Ollama model and loopback server URL |
 | `graph_overrides` | Manual corrections to the dependency map |
 
 ## Project layout
@@ -265,8 +269,8 @@ Settings are in `config.yaml`; every key is optional.
 chaosai/
   mapper.py       manifests -> dependency map
   agents.py       the five agents and the LangGraph state graph that runs them
-  planner.py      candidate ranking (Gemini and rules) and validation
-  llm.py          Gemini client with structured JSON output
+  planner.py      candidate ranking (selected model and rules) and validation
+  llm.py          Gemini and Ollama clients with structured JSON output
   runner.py       inject, measure in four phases, recover
   guard.py        abort rules
   chaos.py        allowlisted Chaos Mesh manifests

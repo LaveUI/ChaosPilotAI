@@ -334,6 +334,36 @@ class LlmTransportTests(unittest.TestCase):
         call.assert_called_once()
         sleep.assert_not_called()
 
+    def test_local_provider_uses_configured_ollama_model_and_json_schema(self):
+        from unittest import mock
+
+        cfg = self.llm.with_provider(self.cfg, "ollama")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"message":{"content":"{\\"summary\\":\\"ready\\"}"}}'
+
+        with mock.patch.object(self.llm.urllib.request, "urlopen", return_value=Response()) as urlopen:
+            metadata = {}
+            result = self.llm.ask_json(
+                cfg, "system", {"input": "value"}, schema={"type": "object"}, metadata=metadata
+            )
+
+        request, = urlopen.call_args.args
+        body = json.loads(request.data)
+        self.assertEqual(result, {"summary": "ready"})
+        self.assertEqual(body["model"], cfg["local_agent"]["model"])
+        self.assertEqual(body["format"], {"type": "object"})
+        self.assertEqual(body["options"]["num_predict"], 1500)
+        self.assertEqual(metadata["provider"], "Ollama")
+        self.assertEqual(metadata["backend"], "ollama")
+
 
 class LlmAgentLoopTests(unittest.TestCase):
     """All five agents in LLM mode, with the model replaced by a scripted fake."""
