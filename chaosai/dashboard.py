@@ -1,8 +1,5 @@
 """Local-first web control panel for ChaosPilot AI."""
 
-import base64
-import binascii
-import hmac
 import json
 import os
 import threading
@@ -492,23 +489,12 @@ def _same_origin(origin, host_header):
         return False
 
 
-def _valid_basic_credentials(authorization, password):
-    scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.lower() != "basic":
-        return False
-    try:
-        supplied = base64.b64decode(token, validate=True)
-    except (ValueError, binascii.Error):
-        return False
-    expected = f"chaospilot:{password}".encode("utf-8")
-    return hmac.compare_digest(supplied, expected)
-
-
 class DashboardHandler(BaseHTTPRequestHandler):
     runtime = None
     page = ""
     public_sim = False
-    public_password = None
+    public_action_lock = threading.Lock()
+    public_last_action = {}
 
     def log_message(self, fmt, *args):
         return
@@ -541,9 +527,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
-    def _has_valid_credentials(self):
-        return _valid_basic_credentials(self.headers.get("Authorization", ""), self.public_password)
-
     def _send(self, status, body, content_type="application/json; charset=utf-8", headers=()):
         encoded = body.encode("utf-8")
         self.send_response(status)
@@ -557,8 +540,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _json(self, status, value, headers=()):
-        self._send(status, json.dumps(value, separators=(",", ":")), headers=headers)
+    def _json(self, status, value):
+        self._send(status, json.dumps(value, separators=(",", ":")))
 
     def _read_body(self):
         if self.headers.get_content_type() != "application/json":
@@ -592,12 +575,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/healthz":
             self._json(200, {"ok": True})
-        elif self.public_sim and not self._has_valid_credentials():
-            self._json(
-                401,
-                {"error": "Dashboard login required."},
-                headers=(("WWW-Authenticate", 'Basic realm="ChaosPilot demo", charset="UTF-8"'),),
-            )
         elif self.path == "/":
             self._send(200, self.page, "text/html; charset=utf-8")
         elif self.path == "/api/state":
@@ -611,15 +588,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authorized_request():
             return
-        if self.public_sim and not self._has_valid_credentials():
-            self._json(
-                401,
-                {"error": "Dashboard login required."},
-                headers=(("WWW-Authenticate", 'Basic realm="ChaosPilot demo", charset="UTF-8"'),),
-            )
-            return
         try:
             payload = self._read_body()
+            if self.public_sim and self.path == "/api/agents":
+                requested_rounds = payload.get("rounds")
+                if isinstance(requested_rounds, bool) or not isinstance(requested_rounds, int):
+                    raise ValueError("Agent rounds must be an integer between 1 and 3 in public simulator mode.")
+                payload["rounds"] = min(requested_rounds, 3)
+                payload["planner_mode"] = "rule-based"
             if self.path == "/api/baseline":
                 self.runtime.start_baseline(payload.get("seconds"))
             elif self.path == "/api/experiment":
@@ -649,21 +625,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def serve(cfg, sim=False, port=8765, public_sim=False):
     if public_sim and not sim:
         raise ValueError("Public dashboard mode is simulation-only. Pass --sim.")
-    password = os.environ.get("CHAOSPILOT_DASHBOARD_PASSWORD")
-    if public_sim and (not password or len(password) < 16):
-        raise ValueError("Set CHAOSPILOT_DASHBOARD_PASSWORD to a value of at least 16 characters.")
     runtime = DashboardRuntime(cfg, sim=sim)
     page_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     with open(page_path, encoding="utf-8") as source:
         DashboardHandler.page = source.read()
     DashboardHandler.runtime = runtime
     DashboardHandler.public_sim = public_sim
-    DashboardHandler.public_password = password if public_sim else None
+    with DashboardHandler.public_action_lock:
+        DashboardHandler.public_last_action.clear()
     host = "0.0.0.0" if public_sim else "127.0.0.1"
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"ChaosPilot dashboard: http://127.0.0.1:{port} ({runtime.env.name})")
     if public_sim:
-        print("Public dashboard is authenticated and simulation-only; no real cluster controls are enabled.")
+        print("Public dashboard is simulation-only; no real cluster controls are enabled.")
     else:
         print("Local-only control surface; do not expose this port to the public internet.")
     try:
@@ -681,7 +655,7 @@ def main(argv=None):
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--sim", action="store_true", help="use the offline simulator")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--public-sim", action="store_true", help="bind publicly with password protection; requires simulation mode")
+    parser.add_argument("--public-sim", action="store_true", help="serve the simulator publicly without login; requires simulation mode")
     args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535:
         parser.error("--port must be between 1024 and 65535")

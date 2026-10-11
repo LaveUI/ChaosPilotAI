@@ -1,4 +1,3 @@
-import base64
 import os
 import json
 import sys
@@ -79,21 +78,19 @@ class DashboardTests(unittest.TestCase):
                 self.assertIn(f'id="page-{name}" data-page="{name}"', page)
                 self.assertIn(f'href="#{name}" data-page-link="{name}"', page)
 
-    def test_public_simulation_requires_password_and_never_allows_live_mode(self):
-        with self.assertRaisesRegex(ValueError, "Pass --sim"):
+    def test_public_simulation_never_allows_live_mode(self):
+        with self.assertRaisesRegex(ValueError, "simulation-only"):
             dashboard.serve(self.cfg, sim=False, public_sim=True)
-        with patch.dict(os.environ, {"CHAOSPILOT_DASHBOARD_PASSWORD": "short"}):
-            with self.assertRaisesRegex(ValueError, "at least 16 characters"):
-                dashboard.serve(self.cfg, sim=True, public_sim=True)
 
-    def test_public_simulation_auth_and_origin_checks(self):
-        password = "render-demo-password-123"
-        valid = "Basic " + base64.b64encode(f"chaospilot:{password}".encode()).decode()
-        self.assertTrue(dashboard._valid_basic_credentials(valid, password))
-        self.assertFalse(dashboard._valid_basic_credentials(valid, "different-password"))
-        self.assertFalse(dashboard._valid_basic_credentials("Basic not-base64", password))
+    def test_public_simulation_rejects_cross_origin_requests(self):
         self.assertTrue(dashboard._same_origin("https://app.onrender.com", "app.onrender.com"))
         self.assertFalse(dashboard._same_origin("https://attacker.example", "app.onrender.com"))
+
+    def test_render_blueprint_does_not_require_dashboard_password(self):
+        with open(os.path.join(ROOT, "render.yaml"), encoding="utf-8") as source:
+            blueprint = source.read()
+        self.assertIn("--sim dashboard --public-sim --port $PORT", blueprint)
+        self.assertNotIn("CHAOSPILOT_DASHBOARD_PASSWORD", blueprint)
 
     def test_dashboard_experiment_uses_allowlist_and_protected_services(self):
         exp = dashboard.validate_experiment(

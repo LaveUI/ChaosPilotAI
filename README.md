@@ -208,20 +208,21 @@ activity, experiment outcomes, and saved run history. Live metrics are limited t
 application tracing, business metrics, or CPU/memory monitoring.
 
 The normal dashboard binds to loopback only and must not be exposed directly to the public internet.
-The Render Blueprint in `render.yaml` deploys a **simulation-only** dashboard protected by HTTP
-Basic Authentication; it cannot connect to Kubernetes or inject real faults.
+The Render Blueprint in `render.yaml` deploys a **public, simulation-only** dashboard with no login;
+it cannot connect to Kubernetes or inject real faults. Anyone who can reach the URL can run
+simulated experiments. Public agent runs are limited to three rounds and use rule-based decisions.
 
 ### Deploy the simulator to Render
 
 1. Push this repository, including `render.yaml`, to GitHub.
 2. In Render, choose **New → Blueprint**, connect `LaveUI/ChaosPilotAI`, and deploy the Blueprint.
-3. When prompted, set `CHAOSPILOT_DASHBOARD_PASSWORD` to a unique password of at least 16 characters.
-4. Open the deployed `onrender.com` URL. Sign in with username `chaospilot` and the password you set.
+3. Deploy, then open the service's `onrender.com` URL directly; no login is required.
 
 Render builds with `pip install -r requirements.txt` and starts
 `python -m chaosai --sim dashboard --public-sim --port $PORT`. The free web service may spin down
-when idle, and its local run history is temporary. Use an upgraded plan and persistent storage if
-you need the demo's history to survive restarts.
+when idle, and its run history is written on the server's temporary filesystem. It is lost when the
+service restarts or redeploys. Local `runs/` data is git-ignored and is not copied to Render. Use an
+upgraded plan and persistent storage if you need run history to survive restarts.
 
 A public live control plane is not included. A free hosted web service cannot reach a Kubernetes
 cluster running on your laptop. To control a real cluster remotely, first deploy an authenticated,

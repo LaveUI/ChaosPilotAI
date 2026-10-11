@@ -236,7 +236,7 @@ def main(argv=None):
     db = sub.add_parser("dashboard", help="open the local web control dashboard")
     db.add_argument("--port", type=int, default=8765)
     db.add_argument("--public-sim", action="store_true",
-                    help="serve the password-protected simulator publicly; requires --sim")
+                    help="serve the simulator publicly without login; requires --sim")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,

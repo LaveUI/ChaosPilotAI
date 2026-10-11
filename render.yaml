@@ -10,5 +10,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
-      - key: CHAOSPILOT_DASHBOARD_PASSWORD
-        sync: false
