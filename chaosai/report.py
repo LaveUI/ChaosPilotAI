@@ -26,6 +26,10 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;p
 svg.timeline{display:block;width:100%;height:auto;margin:8px 0 4px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px}svg{max-width:100%;height:auto}
 .experiment-heading{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:12px}.experiment-heading h3{font-size:18px;margin:0}.audit-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.audit-item{padding:12px;background:var(--surface-2);border-radius:9px;min-width:0}.audit-item b{display:block;margin-top:3px;font-size:13px;overflow-wrap:anywhere}.recommendation{padding:12px 0;border-top:1px solid var(--line)}.recommendation:first-child{border-top:0}.recommendation h4{margin:0 0 5px}.recommendation p{font-size:12px;color:var(--muted)}
 .agent-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.agent-panel{background:var(--surface-2);border:1px solid var(--line);border-radius:11px;padding:16px;min-width:0}.agent-panel h3{margin:0 0 8px}.provenance{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:3px 8px;display:inline-block}.reason-list{padding-left:18px}.round-label{display:inline-block;border-radius:6px;padding:3px 7px;background:var(--surface-2);color:var(--blue);font-size:11px;font-weight:700}
+.chart-panel h3{margin:0 0 12px}.bar-row{display:grid;grid-template-columns:minmax(130px,36%) 1fr 54px;gap:10px;align-items:center;margin:9px 0;font-size:12.5px}.bar-label{overflow-wrap:anywhere}.bar-track{height:16px;background:var(--line);border-radius:5px;overflow:hidden}.bar-track.stacked{display:flex;gap:2px;background:var(--surface-2)}.bar-fill{height:100%;border-radius:5px}.bar-seg{height:100%;border-radius:3px;font-size:10px;line-height:16px;text-align:center;color:var(--bg);font-weight:800;overflow:hidden}.bar-value{text-align:right;font-weight:750;font-variant-numeric:tabular-nums}
+.rank-row{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.rank-chip{border:1px solid var(--line);border-radius:7px;padding:4px 9px;font-size:12px;background:var(--surface);color:var(--muted)}.rank-chip.chosen{border-color:var(--blue);color:var(--ink);font-weight:700}code{font-size:12px;background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+.sev-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:2px 0 6px}.sev-chip{border:1px solid var(--line);border-left:4px solid var(--severity);border-radius:7px;padding:5px 11px;background:var(--surface);font-size:12px;text-transform:capitalize}.sev-chip b{font-size:15px;margin-right:3px}
+svg.depmap{display:block;width:100%;height:auto;margin:0 0 6px}
 .empty-state{padding:18px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}details{margin:12px 0}summary{cursor:pointer;color:var(--blue);font-weight:700;padding:5px 0}details>div,details>p{margin-top:10px}ul{margin:7px 0 0;padding-left:20px}li{padding:4px 0}.section-head{display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap;margin:30px 0 12px}.section-head h2{margin:0}.section-note{font-size:12px;color:var(--muted)}
 @media(max-width:1100px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.findings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.audit-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:740px){main{padding:24px 16px 48px}.hero{grid-template-columns:1fr}.phase-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-two{grid-template-columns:1fr}.flow-arrow{padding:0 5px}}
@@ -305,6 +309,14 @@ def _observed_impact(experiment, baseline):
     }
 
 
+def _latency_phrase(change_pct):
+    """Say the p95 change the right way round; a negative change is not an 'increase'."""
+    if change_pct >= 0:
+        return f"raised p95 latency by {change_pct:.1f}%"
+    return (f"left p95 latency of the successful requests {abs(change_pct):.1f}% lower "
+            "(failed requests have no latency and are counted as errors)")
+
+
 def impact_section(experiment, baseline):
     impact = _observed_impact(experiment, baseline)
     abort_reason = experiment.get("abort_reason")
@@ -318,8 +330,8 @@ def impact_section(experiment, baseline):
     elif impact["latency_increase_pct"] is not None:
         latency_statement = (
             f"{html.escape(str(experiment.get('action', 'Fault')).replace('-', ' ').title())} "
-            f"increased p95 latency by {impact['latency_increase_pct']:.2f}% "
-            "compared with the pre-experiment baseline."
+            + _latency_phrase(impact["latency_increase_pct"])
+            + " compared with the phase before the fault."
         )
     else:
         latency_statement = "p95 latency change is N/A because comparable successful measurements are unavailable."
@@ -394,9 +406,10 @@ def experiment_conclusion(experiment, baseline):
             "latency degradation could not be calculated because there were no successful requests."
         )
     elif impact["latency_increase_pct"] is not None:
+        change = impact["latency_increase_pct"]
         sentence = (
-            f"{service} experienced a {impact['latency_increase_pct']:.1f}% increase in p95 latency "
-            f"during {action}."
+            f"{service}: p95 latency of successful requests was {abs(change):.1f}% "
+            f"{'higher' if change >= 0 else 'lower'} during {action}."
         )
     else:
         sentence = f"{service} was tested with {action}; comparable phase latency measurements are unavailable."
@@ -422,65 +435,207 @@ SEVERITY_COLOR = {"critical": "var(--red)", "high": "var(--red)", "medium": "var
                   "low": "var(--blue)", "none": "var(--green)"}
 
 
-def agents_line(results):
-    """One line saying which agents ran and whether each used the LLM."""
-    agents = results.get("agents")
-    if not agents:
-        return ""
-    order = ("observer", "planner", "injector", "analyst", "reporter")
-    text = " &middot; ".join(f"{name}: {html.escape(str(agents[name]))}" for name in order if name in agents)
-    orch = results.get("orchestrator")
-    orch = f" &middot; orchestrated by: {html.escape(str(orch))}" if orch else ""
-    return f"<div class='muted'>Agents &mdash; {text}{orch}</div>"
+PENALTY_PARTS = (
+    ("errors", "Errors", "var(--red)"),
+    ("latency", "Latency", "var(--amber)"),
+    ("recovery", "Recovery", "var(--purple)"),
+    ("abort", "Safety abort", "var(--teal)"),
+)
+SEVERITY_ORDER = ("critical", "high", "medium", "low", "none")
+
+
+def _experiment_label(experiment):
+    return f"{experiment.get('service', 'Unknown')} · {experiment.get('action', 'fault')}"
+
+
+def _severity_of(experiment):
+    value = experiment.get("ai_severity") or experiment.get("severity")
+    return str(value).lower() if value else None
+
+
+def _fully_recovered(experiment):
+    """Recovered AND back to the pre-fault baseline (when that was measured)."""
+    impact = experiment.get("impact") or {}
+    if impact.get("recovery_verified", experiment.get("recovered")) is not True:
+        return False
+    return impact.get("recovered_to_baseline") is not False
+
+
+def _first_sentence(text, limit=240):
+    text = " ".join(str(text).split())
+    cut = text.find(". ")
+    short = text if cut < 0 else text[:cut + 1]
+    return short if len(short) <= limit else short[:limit - 1].rstrip() + "…"
 
 
 def score_bars(experiments):
-    """Horizontal bar per experiment score (0-100), labelled with service, fault and value."""
+    """One horizontal bar per experiment: resilience score 0-100, weakest first."""
+    rows = []
+    for x in _ordered_experiments(experiments):
+        score = _score_value(x)
+        label = html.escape(_experiment_label(x))
+        rows.append(
+            f"<div class='bar-row'><div class='bar-label'>{label}</div>"
+            f"<div class='bar-track' role='img' aria-label='{label}: score {score:.1f} out of 100'>"
+            f"<div class='bar-fill' style='width:{max(1.0, min(100.0, score)):.1f}%;background:{_color(score)}'></div></div>"
+            f"<div class='bar-value'>{score:.1f}</div></div>"
+        )
+    return "".join(rows)
+
+
+def penalty_bars(experiments):
+    """Stacked bar per experiment: how many of the 100 points each cause took away."""
+    rows = []
+    for x in _ordered_experiments(experiments):
+        breakdown = x.get("breakdown") or {}
+        label = html.escape(_experiment_label(x))
+        segments, lost, spoken = [], 0.0, []
+        for key, name, color in PENALTY_PARTS:
+            value = _number(breakdown.get(key)) or 0.0
+            if value <= 0:
+                continue
+            lost += value
+            spoken.append(f"{name} {value:.1f}")
+            inside = f"{value:.0f}" if value >= 6 else ""
+            segments.append(
+                f"<div class='bar-seg' style='width:{min(100.0, value):.1f}%;background:{color}' "
+                f"title='{name}: -{value:.1f}'>{inside}</div>"
+            )
+        aria = f"{label}: {', '.join(spoken) if spoken else 'no points lost'}"
+        rows.append(
+            f"<div class='bar-row'><div class='bar-label'>{label}</div>"
+            f"<div class='bar-track stacked' role='img' aria-label='{aria}'>{''.join(segments)}</div>"
+            f"<div class='bar-value'>{'-' + format(lost, '.1f') if lost else '0'}</div></div>"
+        )
+    legend = "".join(
+        f"<span class='legend-item'><span class='swatch' style='--swatch:{color}'></span>{name}</span>"
+        for _, name, color in PENALTY_PARTS
+    )
+    return "".join(rows) + f"<div class='chart-legend' style='margin-bottom:0'>{legend}</div>"
+
+
+def severity_strip(experiments):
+    """How many findings fall in each severity band (only when the analyst recorded severities)."""
+    counts = {}
+    for x in experiments:
+        severity = _severity_of(x)
+        if severity:
+            counts[severity] = counts.get(severity, 0) + 1
+    if not counts:
+        return ""
+    chips = "".join(
+        f"<span class='sev-chip' style='--severity:{SEVERITY_COLOR.get(name, 'var(--muted)')}'>"
+        f"<b>{counts[name]}</b> {html.escape(name)}</span>"
+        for name in SEVERITY_ORDER if name in counts
+    )
+    return f"<div class='sev-row'><span class='metric-label'>Findings by severity</span>{chips}</div>"
+
+
+def _overview_charts(experiments):
     if not experiments:
         return ""
-    rows = []
-    for x in sorted(experiments, key=lambda x: x.get("score", 0)):
-        score = float(x.get("score", 0) or 0)
-        label = html.escape(f"{x.get('service')} · {x.get('action')}")
-        rows.append(
-            "<div style='display:grid;grid-template-columns:minmax(150px,34%) 1fr 52px;gap:10px;"
-            "align-items:center;margin:7px 0'>"
-            f"<div style='font-size:13px;overflow-wrap:anywhere'>{label}</div>"
-            "<div style='background:var(--line);border-radius:6px;height:14px' role='img' "
-            f"aria-label='{label}: score {score:.1f} out of 100'>"
-            f"<div style='width:{max(1.0, min(100.0, score)):.1f}%;height:14px;border-radius:6px;"
-            f"background:{_color(score)}'></div></div>"
-            f"<div style='text-align:right;font-variant-numeric:tabular-nums'><b>{score:.1f}</b></div></div>"
-        )
-    return ("<h2>Score per experiment</h2><div class='card'>" + "".join(rows)
-            + "<div class='muted' style='font-size:12px;margin-top:6px'>Scale 0 to 100. Higher is more resilient.</div></div>")
+    return (
+        "<section><div class='section-head'><h2>Results at a glance</h2>"
+        "<span class='section-note'>Weakest experiment first</span></div>"
+        "<div class='grid-two'>"
+        "<div class='panel chart-panel'><h3>Resilience score per experiment</h3>"
+        + score_bars(experiments)
+        + "<p class='section-note'>Scale 0 to 100. Higher is more resilient.</p></div>"
+        "<div class='panel chart-panel'><h3>Points lost, by cause</h3>"
+        + penalty_bars(experiments)
+        + "</div></div>" + severity_strip(experiments) + "</section>"
+    )
 
 
-def severity_section(results):
-    """Weaknesses ranked by severity, from the reporter agent."""
-    rep = results.get("ai_report")
-    if not rep:
+def _graph_layers(nodes):
+    """Column for each service: 0 for services nobody calls, then one step per dependency hop."""
+    depth = {}
+
+    def visit(name, trail=()):
+        if name in depth:
+            return depth[name]
+        callers = [c for c in (nodes[name].get("depended_by") or []) if c in nodes and c not in trail]
+        depth[name] = 1 + max((visit(c, trail + (name,)) for c in callers), default=-1)
+        return depth[name]
+
+    for name in nodes:
+        visit(name)
+    return depth
+
+
+def dependency_graph_svg(graph, experiments):
+    """The dependency map as a left-to-right diagram, with the tested services highlighted."""
+    nodes = {
+        n.get("name"): n for n in (graph or {}).get("nodes") or []
+        if isinstance(n, dict) and n.get("name")
+    }
+    if not nodes:
         return ""
-    who = "Gemini reporter agent" if rep.get("source") == "llm" else "Reporter agent (rule-based)"
-    out = [f"<h2>Weaknesses ranked by severity</h2><div class='muted'>Ranked by: {who}</div>"]
-    ranked = rep.get("ranked_weaknesses") or []
-    if ranked:
-        out.append("<div class='scroll'><table><tr><th>#</th><th>Severity</th><th>Service</th><th>Fault</th>"
-                   "<th>Score</th><th>Why</th></tr>")
-        for i, w in enumerate(ranked, 1):
-            sev = str(w.get("severity") or "low")
+    tested = {}
+    for x in experiments:
+        name = x.get("service")
+        if name in nodes and (name not in tested or _score_value(x) < _score_value(tested[name])):
+            tested[name] = x
+    depth = _graph_layers(nodes)
+    columns = {}
+    for name in sorted(nodes):
+        columns.setdefault(depth[name], []).append(name)
+    box_w, box_h, gap_y, pad = 176, 38, 14, 16
+    width = 980
+    tallest = max(len(names) for names in columns.values())
+    height = pad * 2 + tallest * box_h + (tallest - 1) * gap_y
+    span = max(1, max(columns))
+    position = {}
+    for column, names in columns.items():
+        x = pad + column * (width - 2 * pad - box_w) / span
+        block = len(names) * box_h + (len(names) - 1) * gap_y
+        top = (height - block) / 2
+        for row, name in enumerate(names):
+            position[name] = (x, top + row * (box_h + gap_y))
+    out = [
+        f"<svg class='depmap' viewBox='0 0 {width} {height:.0f}' role='img' "
+        "aria-label='Service dependency map with tested services highlighted'>"
+        "<title>Service dependency map</title>"
+    ]
+    for name, node in sorted(nodes.items()):
+        for target in node.get("depends_on") or []:
+            if target not in position:
+                continue
+            x1, y1 = position[name][0] + box_w, position[name][1] + box_h / 2
+            x2, y2 = position[target][0], position[target][1] + box_h / 2
+            hit = tested.get(target)
+            stroke = _color(_score_value(hit)) if hit else "var(--muted)"
+            mid = (x1 + x2) / 2
             out.append(
-                f"<tr><td>{i}</td>"
-                f"<td><b style='color:{SEVERITY_COLOR.get(sev, 'var(--muted)')}'>{html.escape(sev)}</b></td>"
-                f"<td>{html.escape(str(w.get('service')))}</td><td>{html.escape(str(w.get('action')))}</td>"
-                f"<td>{html.escape(str(w.get('score')))}</td><td>{html.escape(str(w.get('why', '')))}</td></tr>"
+                f"<path d='M {x1:.1f} {y1:.1f} C {mid:.1f} {y1:.1f}, {mid:.1f} {y2:.1f}, {x2:.1f} {y2:.1f}' "
+                f"fill='none' stroke='{stroke}' stroke-width='{1.8 if hit else 1}' "
+                f"opacity='{0.9 if hit else 0.4}'></path>"
             )
-        out.append("</table></div>")
-    else:
-        out.append("<p style='color:var(--green)'>No weaknesses found in this session.</p>")
-    if rep.get("score_explanation"):
-        out.append(f"<p class='muted'><b>About the score:</b> {html.escape(str(rep['score_explanation']))}</p>")
-    return "".join(out)
+    for name, (x, y) in position.items():
+        hit = tested.get(name)
+        stroke = _color(_score_value(hit)) if hit else "var(--line)"
+        out.append(
+            f"<rect x='{x:.1f}' y='{y:.1f}' width='{box_w}' height='{box_h}' rx='8' "
+            f"fill='var(--surface-2)' stroke='{stroke}' stroke-width='{2.2 if hit else 1}'></rect>"
+        )
+        label = html.escape(str(name))
+        if hit:
+            detail = html.escape(f"{hit.get('action', 'fault')} · score {_score_value(hit):.1f}")
+            out.append(
+                f"<text x='{x + 10:.1f}' y='{y + 16:.1f}' font-size='11.5' font-weight='700' "
+                f"fill='var(--ink)'>{label}</text>"
+                f"<text x='{x + 10:.1f}' y='{y + 30:.1f}' font-size='10.5' fill='{stroke}'>{detail}</text>"
+            )
+        else:
+            out.append(
+                f"<text x='{x + 10:.1f}' y='{y + 23:.1f}' font-size='11.5' fill='var(--ink)'>{label}</text>"
+            )
+    out.append("</svg>")
+    return (
+        "".join(out)
+        + "<p class='section-note'>Arrows run from a caller (left) to the service it depends on (right). "
+        "Outlined services were tested in this run; coloured arrows are their direct callers.</p>"
+    )
 
 
 def round_context(x):
@@ -556,13 +711,8 @@ def _summary_copy(results, experiments):
             )
         else:
             text += " Comparable successful-request measurements were not available."
-        verified = sum(
-            1 for experiment in experiments
-            if (experiment.get("impact") or {}).get(
-                "recovery_verified", experiment.get("recovered")
-            ) is True
-        )
-        text += f" Recovery was recorded as verified for {verified} of {len(experiments)} experiment(s)."
+        full = sum(1 for experiment in experiments if _fully_recovered(experiment))
+        text += f" {full} of {len(experiments)} experiment(s) recovered fully, back to the pre-fault baseline."
     return (
         "<b>Evidence-based summary</b>"
         f"<p>{text}</p>"
@@ -606,9 +756,9 @@ def _finding_cards(experiments, baseline):
             if experiment.get("aborted") else ""
         )
         details = (
-            html.escape(str(experiment.get("ai_diagnosis")))
+            html.escape(_first_sentence(experiment.get("ai_diagnosis")))
             if experiment.get("ai_diagnosis")
-            else "Measured endpoint effect only; the saved run does not include a service-level diagnosis."
+            else "Measured effect at the shop frontend; no analyst diagnosis was saved for this run."
         )
         cards.append(
             f"<article class='finding-card' style='--severity:var(--{color})'>"
@@ -620,10 +770,7 @@ def _finding_cards(experiments, baseline):
                 f"<div class='finding-metric'><span class='metric-label'>{html.escape(label)}</span>"
                 f"<b>{html.escape(value)}</b></div>" for label, value in metrics
             )
-            + f"</div><p class='finding-note'>{details}</p>{abort}"
-            "<p class='finding-note'>p95 reflects successful probes only; failed requests are reported separately.</p>"
-            "<p class='finding-note'>Dependency relationships indicate potential blast radius only; "
-            "they do not prove dependent services failed.</p></article>"
+            + f"</div><p class='finding-note'>{details}</p>{abort}</article>"
         )
     return "<div class='findings-grid'>" + "".join(cards) + "</div>"
 
@@ -632,43 +779,69 @@ def severity_color(severity):
     return {"critical": "red", "high": "red", "medium": "amber", "low": "blue"}.get(severity, "blue")
 
 
-def _recommendation_section(experiments):
-    recommendations = []
-    seen = set()
+def _collect_recommendations(experiments):
+    """Every distinct fix once, weakest experiment first.
+
+    When the analyst agent already recommends more replicas, the rule-based "run 2 replicas" entry
+    says the same thing, so the two are merged: the agent's wording stays and keeps the auto-fix.
+    """
+    collected, seen = [], set()
     for experiment in _ordered_experiments(experiments):
-        for recommendation in experiment.get("recommendations") or []:
-            title = str(recommendation.get("title") or "Recommendation")
-            if title == "Safety limit stopped this experiment":
+        items = [
+            dict(item) for item in experiment.get("recommendations") or []
+            if isinstance(item, dict) and item.get("title") != "Safety limit stopped this experiment"
+        ]
+        agent_replica_fix = next(
+            (item for item in items
+             if str(item.get("source", "")).lower() == "llm"
+             and "replica" in f"{item.get('title', '')} {item.get('detail', '')}".lower()),
+            None,
+        )
+        for item in items:
+            auto_fix = item.get("auto_fix") or {}
+            same_fix = auto_fix.get("type") == "scale" or "replica" in str(item.get("title", "")).lower()
+            if (agent_replica_fix is not None and item is not agent_replica_fix and same_fix
+                    and str(item.get("source", "rule-based")).lower() != "llm"):
+                if auto_fix:
+                    agent_replica_fix.setdefault("auto_fix", auto_fix)
+                elif "data store" in str(item.get("detail", "")).lower():
+                    agent_replica_fix["detail"] = (
+                        f"{agent_replica_fix.get('detail', '')} This is a data store: extra replicas "
+                        "only help once replication is set up, so it is not applied automatically."
+                    ).strip()
                 continue
-            key = (str(experiment.get("service")), title)
+            key = (str(experiment.get("service")), str(item.get("title") or "Recommendation"))
             if key in seen:
                 continue
             seen.add(key)
-            recommendations.append((experiment, recommendation))
+            collected.append((experiment, item))
+    return collected
+
+
+def _recommendation_section(experiments):
+    recommendations = _collect_recommendations(experiments)
     if not recommendations:
         return "<div class='empty-state'>No remediation recommendations were saved for this run.</div>"
     rows = []
     for rank, (experiment, recommendation) in enumerate(recommendations, 1):
         service = html.escape(str(experiment.get("service", "Unknown service")))
+        action = html.escape(str(experiment.get("action", "fault")))
         title = html.escape(str(recommendation.get("title", "Recommendation")))
         detail = html.escape(str(recommendation.get("detail", "Details not recorded.")))
-        source = recommendation.get("source") or experiment.get("analyst") or "rule-based"
-        auto_fix = recommendation.get("auto_fix")
+        source = _source_label(recommendation.get("source") or experiment.get("analyst") or "rule-based")
         applicability = (
-            "Auto-fix candidate; not applied by this report."
-            if auto_fix else "Manual engineering action; implementation not recorded."
+            "<span class='pill status-ok'>auto-fix available: chaosai fix</span>"
+            if recommendation.get("auto_fix") else "<span class='pill'>manual change</span>"
         )
         rows.append(
             f"<div class='recommendation'><div class='row'><h4><span class='rank'>#{rank}</span> "
-            f"{title}</h4><span class='pill'>{html.escape(str(source))}</span></div>"
-            f"<p><b>{service}</b> · associated experiment score {_score_value(experiment):.1f}/100. "
-            f"{detail}</p><p>{applicability}</p></div>"
+            f"{title}</h4><span class='row'>{applicability}<span class='pill'>{html.escape(source)}</span></span></div>"
+            f"<p><b>{service}</b> · found by {action} (score {_score_value(experiment):.1f}/100). {detail}</p></div>"
         )
     return (
         "<div class='panel'>" + "".join(rows)
-        + "<p class='muted'>Provisional order follows the associated experiment resilience score "
-        "(lowest first). Cost, effort, confidence, and verified impact were not saved, so this is "
-        "not a quantified remediation-priority model.</p></div>"
+        + "<p class='section-note'>Ordered by the score of the experiment that exposed the weakness, "
+        "lowest first.</p></div>"
     )
 
 
@@ -737,23 +910,25 @@ def _dependency_section(experiments, graph):
             f"<td>{html.escape(str(transitive if transitive is not None else 'Not recorded'))}</td>"
             f"<td>{html.escape(str(node.get('replicas', 'Not recorded')))}</td></tr>"
         )
-    return (
-        "<div class='panel'><div class='scroll'><table><thead><tr><th>Fault target</th>"
+    table = (
+        "<div class='scroll'><table><thead><tr><th>Fault target</th>"
         "<th>Fault</th><th>Direct dependents (potential callers)</th>"
         "<th>Transitive dependents</th><th>Replicas</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table></div><p class='muted'>The dependency mapper describes topology, not "
-        "observed caller failures. This saved run does not contain route-level or per-caller "
-        "measurements; business-journey impact is therefore not established.</p></div>"
+        + "</tbody></table></div>"
     )
+    diagram = dependency_graph_svg(graph, experiments)
+    if diagram:
+        table = f"<details><summary>Dependents and replicas of each tested service</summary>{table}</details>"
+    return "<div class='panel'>" + diagram + table + "</div>"
 
 
 def _safety_section(results, experiments):
     limits = results.get("limits") or {}
     limit_items = [
-        ("Maximum error-rate threshold", _fmt_rate(limits.get("max_error_rate"))),
-        ("p95 threshold", _fmt_ms(limits.get("p95_limit_ms"))),
-        ("Extra unhealthy-pod limit", limits.get("max_extra_unhealthy_pods", "Not recorded")),
+        ("Abort above error rate", _fmt_rate(limits.get("max_error_rate"))),
+        ("Abort above p95", _fmt_ms(limits.get("p95_limit_ms"))),
+        ("Abort above extra unhealthy pods", limits.get("max_extra_unhealthy_pods", "Not recorded")),
     ]
     rows = []
     for experiment in experiments:
@@ -765,25 +940,21 @@ def _safety_section(results, experiments):
             f"<td>{'Triggered' if experiment.get('aborted') else 'Not triggered'}</td>"
             f"<td>{abort_latency_text}</td>"
             f"<td>{'Confirmed by runner' if experiment.get('cleanup_confirmed') is True else ('Not confirmed' if experiment.get('cleanup_confirmed') is False else 'Not recorded')}</td>"
-            f"<td>{'Yes' if experiment.get('recovered') else 'No / not recorded'}</td></tr>"
+            f"<td>{'Yes' if _fully_recovered(experiment) else ('Partial: baseline not restored' if experiment.get('recovered') else 'No / not recorded')}</td></tr>"
         )
     return (
-        "<div class='panel'><div class='audit-grid'>"
+        "<div class='panel'><div class='meta-row' style='margin:0 0 6px'>"
         + "".join(
-            f"<div class='audit-item'><span class='metric-label'>{html.escape(str(label))}</span>"
-            f"<b>{html.escape(str(value))}</b></div>" for label, value in limit_items
+            f"<span class='meta-chip'><b>{html.escape(str(label))}</b> {html.escape(str(value))}</span>"
+            for label, value in limit_items
         )
-        + "<div class='audit-item'><span class='metric-label'>Experiment environment</span>"
-        f"<b>{html.escape(str(results.get('env', 'Not recorded')))}</b></div>"
-        "<div class='audit-item'><span class='metric-label'>Policy evidence</span>"
-        "<b>Rendered fault manifests and full allowlist were not saved in this result.</b></div>"
-        "</div><div class='scroll' style='margin-top:15px'><table><thead><tr>"
+        + f"<span class='meta-chip'><b>Environment</b> {html.escape(str(results.get('env', 'Not recorded')))}</span>"
+        "</div><div class='scroll'><table><thead><tr>"
         "<th>Target</th><th>Fault</th><th>Guard stop</th><th>Abort latency</th>"
         "<th>Cleanup signal</th><th>Recovery</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table></div><p class='muted'>“Cleanup confirmed” is the runner's recorded "
-        "cleanup signal, not a general guarantee that the cluster is safe. Verify live workloads "
-        "and fault resources before another production experiment.</p></div>"
+        + "</tbody></table></div><p class='section-note'>Cleanup signal: the runner deleted the fault "
+        "and saw the delete succeed.</p></div>"
     )
 
 
@@ -833,9 +1004,15 @@ def _technical_appendix(results, graph, experiments):
         "<th>Score</th><th>Penalty breakdown</th></tr></thead><tbody>"
         + "".join(experiment_rows)
         + "</tbody></table></div>"
-        "<p class='muted'>The four phase cards show p50, p95, error rate, and phase sample count "
-        "when recorded. The latency timeline plots successful probes; failed probes are marked at "
-        "the chart baseline and are not treated as latency values.</p></details>"
+        "<p><b>How to read this report</b></p><ul>"
+        "<li>Probes go to the shop frontend. Latency percentiles use successful requests only; "
+        "failed requests are counted as errors and drawn as × on the timeline.</li>"
+        "<li>The dependency map shows which services could be affected (blast radius). Failures of "
+        "individual callers are not measured separately.</li>"
+        "<li>Scores, penalties, error rates and recovery times are calculated by code from the "
+        "probes. Agent text (rationale, diagnosis, fixes, severity) is labelled with its source.</li>"
+        "<li>The resilience score describes these experiments only; it is not an availability SLO.</li>"
+        "</ul></details>"
     )
 
 
@@ -902,22 +1079,14 @@ def _report_provenance(results):
 def _agent_execution_section(results):
     provenance = _report_provenance(results)
     agent_status = results.get("agents") or {}
-    cards = []
-    for agent in ("observer", "planner", "injector", "analyst", "reporter"):
-        status = _source_label(agent_status.get(agent))
-        cards.append(
-            f"<div class='audit-item'><span class='metric-label'>{html.escape(agent.title())} Agent</span>"
-            f"<b>{html.escape(status)}</b></div>"
-        )
     optional_counts = (
-        f"{provenance['gemini_calls']} successful Gemini call(s)"
+        f"{provenance['gemini_calls']} successful"
         if provenance["gemini_calls"] is not None else "Not recorded"
     )
     fallback_count = (
-        f"{provenance['fallback_calls']} fallback decision(s)"
+        f"{provenance['fallback_calls']}"
         if provenance["fallback_calls"] is not None else "Not recorded"
     )
-    model_line = html.escape(str(provenance["model"]))
     fallback = (
         f"<p class='status-warn'><b>Fallback reason:</b> "
         f"{html.escape(str(provenance['fallback_reason']))}</p>"
@@ -943,24 +1112,30 @@ def _agent_execution_section(results):
             "<th>Fallback</th><th>Retries</th><th>Duration</th><th>Fallback reason</th></tr></thead><tbody>"
             + "".join(call_rows) + "</tbody></table></div></details>"
         )
+    def chip(label, value):
+        return f"<span class='meta-chip'><b>{html.escape(label)}</b> {html.escape(str(value))}</span>"
+
+    rounds_text = provenance["rounds"] if provenance["rounds"] is not None else "not recorded"
+    run_chips = (
+        chip("Decisions", provenance["source"])
+        + chip("Orchestrator", provenance["orchestrator"])
+        + chip("Model", provenance["model"])
+        + chip("Rounds", rounds_text)
+        + chip("Experiments", provenance["experiments"])
+        + chip("Gemini calls", optional_counts)
+        + chip("Fallbacks", fallback_count)
+    )
+    agent_chips = "".join(
+        chip(agent.title(), _source_label(agent_status.get(agent)))
+        for agent in ("observer", "planner", "injector", "analyst", "reporter")
+    )
     return (
         "<section><div class='section-head'><h2>Agent execution overview</h2>"
-        "<span class='section-note'>Execution source and orchestration metadata from this run</span></div>"
-        "<div class='panel'><div class='audit-grid'>"
-        f"<div class='audit-item'><span class='metric-label'>Decision provenance</span><b>{html.escape(provenance['source'])}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Execution environment</span><b>{html.escape(provenance['environment'])}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Requested / recorded model</span><b>{model_line}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Orchestrator</span><b>{html.escape(str(provenance['orchestrator']))}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Rounds</span><b>{html.escape(str(provenance['rounds'] if provenance['rounds'] is not None else 'Not recorded'))}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Completed experiments</span><b>{html.escape(str(provenance['experiments']))}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Gemini calls</span><b>{html.escape(optional_counts)}</b></div>"
-        f"<div class='audit-item'><span class='metric-label'>Fallbacks</span><b>{html.escape(fallback_count)}</b></div>"
-        + "".join(cards)
-        + f"</div>{fallback}"
+        "<span class='section-note'>Who made the decisions in this run</span></div>"
+        f"<div class='panel'><div class='meta-row' style='margin:0 0 8px'>{run_chips}</div>"
+        f"<div class='meta-row' style='margin:0'>{agent_chips}</div>{fallback}"
         + call_table
-        + "<p class='muted'>Environment and decision provenance are independent: a Kubernetes run can "
-        "be rule-based, mixed, or Gemini-powered. A model name alone does not prove that Gemini "
-        "generated every agent decision.</p></div></section>"
+        + "</div></section>"
     )
 
 
@@ -971,24 +1146,24 @@ def _cluster_observation_html(snapshot):
         ("Unhealthy pods", snapshot.get("unhealthy_pods") or []),
         ("Pods with restarts", snapshot.get("pods_with_restarts") or []),
         ("Warnings", snapshot.get("warning_events") or []),
+        ("Deployments not ready", list((snapshot.get("deployments_not_ready") or {}).keys())),
     )
-    content = []
-    for label, entries in groups:
-        if entries:
-            content.append(f"<p><b>{html.escape(label)}:</b> "
-                           f"{html.escape('; '.join(str(item) for item in entries))}</p>")
-        else:
-            content.append(f"<p><b>{html.escape(label)}:</b> None recorded in this snapshot.</p>")
-    not_ready = snapshot.get("deployments_not_ready") or {}
-    content.append(
-        "<p><b>Deployments not ready:</b> "
-        + (
-            html.escape(", ".join(map(str, not_ready.keys())))
-            if not_ready else "None recorded."
-        )
-        + "</p>"
-    )
+    content = [
+        f"<p><b>{html.escape(label)}:</b> {html.escape('; '.join(str(item) for item in entries))}</p>"
+        for label, entries in groups if entries
+    ]
+    if not content:
+        return ("<p><b>Cluster:</b> no unhealthy pods, restarts, warning events or unready "
+                "deployments in this snapshot.</p>")
     return "".join(content)
+
+
+def _health_text(healthy):
+    if healthy is True:
+        return "<span class='status-ok'>Healthy</span>"
+    if healthy is False:
+        return "<span class='status-failed'>Not healthy</span>"
+    return "Not recorded"
 
 
 def _observer_planner_sections(results):
@@ -1012,19 +1187,31 @@ def _observer_planner_sections(results):
         )
         ranked = entry.get("ranked_candidates") or []
         if ranked:
-            candidate_rows = []
+            candidate_rows, ranking, chosen_reason = [], [], ""
             for candidate in ranked:
+                name = html.escape(f"{candidate.get('service', 'Unknown')} · {candidate.get('action', 'Unknown')}")
+                rank = html.escape(str(candidate.get("rank", "?")))
+                if candidate.get("chosen"):
+                    ranking.append(f"<span class='rank-chip chosen'>{rank}. {name} — selected</span>")
+                    chosen_reason = html.escape(str(candidate.get("rationale", "")))
+                elif candidate.get("already_tested"):
+                    ranking.append(f"<span class='rank-chip'>{rank}. {name} (already tested)</span>")
+                else:
+                    ranking.append(f"<span class='rank-chip'>{rank}. {name}</span>")
                 candidate_rows.append(
-                    f"<tr><td>{html.escape(str(candidate.get('rank', 'N/A')))}</td>"
+                    f"<tr><td>{rank}</td>"
                     f"<td>{html.escape(str(candidate.get('service', 'Unknown')))}</td>"
                     f"<td>{html.escape(str(candidate.get('action', 'Unknown')))}</td>"
-                    f"<td>{'<b>Selected</b>' if candidate.get('chosen') else ''}</td>"
+                    f"<td>{'<b>Selected</b>' if candidate.get('chosen') else ('Already tested' if candidate.get('already_tested') else '')}</td>"
                     f"<td>{html.escape(str(candidate.get('rationale', 'Not recorded')))}</td></tr>"
                 )
             ranked_html = (
+                f"<div class='rank-row'>{''.join(ranking)}</div>"
+                + (f"<p><b>Why this one:</b> {chosen_reason}</p>" if chosen_reason else "")
+                + f"<details><summary>Reason for every candidate ({len(ranked)})</summary>"
                 "<div class='scroll'><table><thead><tr><th>Rank</th><th>Service</th><th>Fault</th>"
                 "<th>Decision</th><th>Rationale</th></tr></thead><tbody>"
-                + "".join(candidate_rows) + "</tbody></table></div>"
+                + "".join(candidate_rows) + "</tbody></table></div></details>"
             )
         else:
             ranked_html = "<p class='muted'>Ranked candidate list not recorded for this round.</p>"
@@ -1034,12 +1221,12 @@ def _observer_planner_sections(results):
         concern_text = html.escape(", ".join(map(str, concerns)) or "None recorded")
         cards.append(
             f"<article class='agent-panel'><div class='row'><h3>Round {html.escape(str(round_number))}</h3>"
-            "<span class='provenance'>Observer: " + html.escape(observed_by) + "</span></div>"
-            f"<p><b>Health:</b> {html.escape(str(observation.get('healthy', 'Not recorded')))} · "
-            f"{html.escape(probe_summary)}</p><p><b>Summary:</b> {observation_text}</p>"
-            f"<p><b>Unhealthy service concerns:</b> {concern_text}</p>"
+            "<span class='row'><span class='provenance'>Observer: " + html.escape(observed_by) + "</span>"
+            "<span class='provenance'>Planner: " + html.escape(planner_source) + "</span></span></div>"
+            f"<p><b>Observed:</b> {_health_text(observation.get('healthy'))} · "
+            f"{html.escape(probe_summary)}. {observation_text}</p>"
+            + (f"<p><b>Services of concern:</b> {concern_text}</p>" if concerns else "")
             + _cluster_observation_html(observation.get("cluster"))
-            + f"<p><b>Planner source:</b> {html.escape(planner_source)}</p>"
             + (f"<p class='status-warn'><b>Planner fallback:</b> {html.escape(str(planner_reason))}</p>"
                if planner_reason else "")
             + ranked_html
@@ -1047,8 +1234,8 @@ def _observer_planner_sections(results):
         )
     return (
         "<section><div class='section-head'><h2>Observer &amp; Planner Agent</h2>"
-        "<span class='section-note'>Health evidence and ranked candidate choices by round</span></div>"
-        "<div class='agent-grid'>" + "".join(cards) + "</div></section>"
+        "<span class='section-note'>What was observed and how the experiments were ranked, by round</span></div>"
+        "<div class='agent-grid' style='grid-template-columns:1fr'>" + "".join(cards) + "</div></section>"
     )
 
 
@@ -1080,7 +1267,8 @@ def _reporter_section(results):
     rows = []
     for index, item in enumerate(ranked, 1):
         rows.append(
-            f"<tr><td>{index}</td><td>{html.escape(str(item.get('severity', 'Not recorded')))}</td>"
+            f"<tr><td>{index}</td><td><b style='color:{SEVERITY_COLOR.get(str(item.get('severity', '')).lower(), 'var(--muted)')}'>"
+            f"{html.escape(str(item.get('severity', 'Not recorded')))}</b></td>"
             f"<td>{html.escape(str(item.get('service', 'Unknown')))}</td>"
             f"<td>{html.escape(str(item.get('action', 'Unknown')))}</td>"
             f"<td>{html.escape(str(item.get('score', 'N/A')))}</td>"
@@ -1089,14 +1277,17 @@ def _reporter_section(results):
     source = _source_label(report_data.get("source"))
     overall = report_data.get("overall")
     score_explanation = report_data.get("score_explanation")
+    shown_at_top = " ".join(str(results.get("summary") or "").split())
+    if overall and " ".join(str(overall).split()) == shown_at_top:
+        overall_html = ""        # already printed in the summary panel at the top of the report
+    elif overall:
+        overall_html = f"<h3>Overall investigation summary</h3><p>{html.escape(str(overall))}</p>"
+    else:
+        overall_html = ""
     return (
         "<section><div class='section-head'><h2>Reporter Agent</h2>"
         f"<span class='provenance'>{html.escape(source)}</span></div><div class='panel'>"
-        "<h3>Overall investigation summary</h3>"
-        + (
-            f"<p>{html.escape(str(overall))}</p>"
-            if overall else "<p class='muted'>No Reporter overall summary was saved.</p>"
-        )
+        + overall_html
         + "<h3>Weaknesses Ranked by Severity</h3>"
         + (
             "<div class='scroll'><table><thead><tr><th>Rank</th><th>Severity</th><th>Service</th>"
@@ -1123,14 +1314,26 @@ def _injector_decision_section(experiment, limits, round_decision=None):
         "Fault ran; preflight decision metadata not recorded"
     )
     source = _source_label(decision.get("source"))
-    requested = decision.get("requested_duration_s", experiment.get("duration_s"))
+    planned = _number(decision.get("requested_duration_s"))
+    approved = _number(decision.get("actual_duration_s"))
+    if approved is None or approval is False:
+        approved = _number(experiment.get("duration_s")) if approval is not False else None
     events = experiment.get("events") or {}
     injected = _number(events.get("fault_injected_at_s"))
     removed = _number(events.get("fault_removed_at_s"))
-    actual = decision.get("actual_duration_s")
-    if injected is not None and removed is not None:
-        actual = max(0.0, removed - injected)
-    actual_text = f"{_number(actual):.1f} s" if _number(actual) is not None else "Not recorded"
+    active = max(0.0, removed - injected) if injected is not None and removed is not None else None
+    stopped_early = (
+        " (stopped early)" if active is not None and approved and active < approved - 1 else ""
+    )
+    duration_parts = []
+    if planned is not None:
+        duration_parts.append(f"<b>Planned:</b> {planned:.0f} s")
+    if approved is not None:
+        duration_parts.append(f"<b>Approved by injector:</b> {approved:.0f} s")
+    duration_parts.append(
+        f"<b>Fault actually active:</b> {active:.1f} s{stopped_early}" if active is not None
+        else "<b>Fault actually active:</b> not recorded"
+    )
     reason = decision.get("reason") or experiment.get("injector_reason")
     rollback = experiment.get("agent_rollback")
     cleanup = (
@@ -1148,12 +1351,11 @@ def _injector_decision_section(experiment, limits, round_decision=None):
         "<div class='agent-panel'><h3>Injector Agent decision</h3>"
         f"<p><b>{html.escape(decision_text)}</b> · {html.escape(source)}</p>"
         f"<p><b>Reason:</b> {html.escape(str(reason or 'Decision reasoning not recorded.'))}</p>"
-        f"<p><b>Requested duration:</b> {html.escape(str(requested if requested is not None else 'N/A'))} s · "
-        f"<b>Actual fault duration:</b> {actual_text}</p>"
+        f"<p>{' · '.join(duration_parts)}</p>"
         f"<p><b>Safety thresholds:</b> {threshold_text}</p>"
-        f"<p><b>Early rollback:</b> {html.escape(str(rollback or 'No early rollback recorded'))}</p>"
-        f"<p><b>Automatic abort:</b> {html.escape(str(abort_reason or 'Not triggered'))}</p>"
-        f"<p><b>Cleanup verification:</b> {html.escape(cleanup)}</p>"
+        f"<p><b>Rollback by the agent:</b> {html.escape(str(rollback or 'not needed'))} · "
+        f"<b>Abort by the safety guard:</b> {html.escape(str(abort_reason or 'not triggered'))} · "
+        f"<b>Cleanup:</b> {html.escape(cleanup.lower())}</p>"
         + (f"<p class='status-warn'><b>Fallback:</b> {html.escape(str(fallback))}</p>" if fallback else "")
         + "</div>"
     )
@@ -1186,16 +1388,9 @@ def render(results, graph, previous=None):
     planner_name = str(results.get("planner", "Not recorded"))
     weak_count = sum(1 for experiment in experiments if _score_value(experiment) < 90)
     abort_count = sum(1 for experiment in experiments if experiment.get("aborted"))
-    recovered_count = sum(
-        1 for experiment in experiments
-        if (experiment.get("impact") or {}).get("recovery_verified", experiment.get("recovered")) is True
-    )
-    recommendation_count = sum(
-        1
-        for experiment in experiments
-        for item in experiment.get("recommendations") or []
-        if item.get("title") != "Safety limit stopped this experiment"
-    )
+    recovered_count = sum(1 for experiment in experiments if _fully_recovered(experiment))
+    recommendation_count = len(_collect_recommendations(experiments))
+    has_rounds = isinstance(results.get("rounds"), list) and bool(results.get("rounds"))
     app_label = "Mapped microservice application"
     model = results.get("llm_model") or results.get("summary_model")
     parts = [
@@ -1239,26 +1434,19 @@ def render(results, graph, previous=None):
     parts.append(
         "<section class='kpi-grid' aria-label='Run key performance indicators'>"
         + _kpi("Experiments", len(experiments), "saved fault scenarios")
-        + _kpi("Weak findings", weak_count, "score below 90")
+        + _kpi("Weaknesses found", weak_count, "experiments scoring below 90")
         + _kpi("Safety stops", abort_count, "guard-triggered aborts")
-        + _kpi("Recoveries", f"{recovered_count}/{len(experiments)}", "recorded as verified")
-        + _kpi("Recommendations", recommendation_count, "saved follow-up actions")
+        + _kpi("Full recoveries", f"{recovered_count}/{len(experiments)}", "recovered and back to baseline")
+        + _kpi("Recommendations", recommendation_count, "distinct follow-up actions")
         + _kpi("Baseline probes", baseline.get("samples", "N/A"), "before fault injection")
         + "</section>"
     )
 
     parts.append(f"<section class='panel summary'>{_summary_copy(results, experiments)}</section>")
-    parts.append(
-        "<div class='flow' aria-label='Experiment lifecycle'>"
-        "<span class='flow-step'><span class='flow-num'>1</span>Baseline</span><span class='flow-arrow' aria-hidden='true'>→</span>"
-        "<span class='flow-step'><span class='flow-num'>2</span>Inject fault</span><span class='flow-arrow' aria-hidden='true'>→</span>"
-        "<span class='flow-step'><span class='flow-num'>3</span>Observe impact</span><span class='flow-arrow' aria-hidden='true'>→</span>"
-        "<span class='flow-step'><span class='flow-num'>4</span>Recover &amp; verify</span></div>"
-    )
-
+    parts.append(_overview_charts(experiments))
     parts.append(
         "<section><div class='section-head'><h2>Top measured findings</h2>"
-        "<span class='section-note'>Ranked by measured resilience score · recorded severity shown only when available</span></div>"
+        "<span class='section-note'>Ranked by measured resilience score, weakest first</span></div>"
         + _finding_cards(experiments, baseline) + "</section>"
     )
     parts.append(_agent_execution_section(results))
@@ -1267,17 +1455,24 @@ def render(results, graph, previous=None):
 
     parts.append(
         "<section><div class='section-head'><h2>Recommended next actions</h2>"
-        "<span class='section-note'>Transparent provisional order; not a fix-impact score</span></div>"
+        "<span class='section-note'>Fixes proposed by the analyst agent and the built-in rules</span></div>"
         + _recommendation_section(experiments) + "</section>"
     )
-    parts.append(
-        "<section><div class='section-head'><h2>Fix verification</h2>"
-        "<span class='section-note'>A score comparison alone does not establish causality</span></div>"
-        + _fix_verification(experiments, previous) + "</section>"
-    )
+    if previous:
+        parts.append(
+            "<section><div class='section-head'><h2>Fix verification</h2>"
+            "<span class='section-note'>Same experiments, before and after the fix</span></div>"
+            + _fix_verification(experiments, previous) + "</section>"
+        )
+    else:
+        parts.append(
+            "<p class='section-note'><b>Verification pending.</b> No fix has been re-tested yet, so this "
+            "report cannot verify remediation. Run <code>chaosai fix</code> and then "
+            "<code>chaosai rerun</code> to add the before/after comparison.</p>"
+        )
     parts.append(
         "<section><div class='section-head'><h2>Dependency &amp; blast-radius context</h2>"
-        "<span class='section-note'>Topology is potential impact, not observed failure</span></div>"
+        "<span class='section-note'>Who depends on each tested service (potential impact)</span></div>"
         + _dependency_section(experiments, graph) + "</section>"
     )
     parts.append(
@@ -1305,11 +1500,12 @@ def render(results, graph, previous=None):
             "<article class='card'><div class='experiment-heading row'>"
             f"<div><h3>{action} · {service}</h3>"
             f"<span class='muted'>Experiment {e(str(experiment.get('id', 'not recorded')))} · "
-            f"requested duration {e(str(experiment.get('duration_s', 'N/A')))} s</span></div>"
+            f"fault duration set to {e(str(experiment.get('duration_s', 'N/A')))} s</span></div>"
             f"<div class='row'>{abort}<span class='pill'>Score {score_value:.1f}/100</span></div></div>"
-            f"{round_context(experiment)}"
-            f"<p class='muted'><b>{rationale_label}:</b> "
-            f"{e(str(experiment.get('rationale', 'Not recorded.')))}</p>"
+            f"{'' if has_rounds else round_context(experiment)}"
+            + ("" if has_rounds else
+               f"<p class='muted'><b>{rationale_label}:</b> "
+               f"{e(str(experiment.get('rationale', 'Not recorded.')))}</p>")
             + _injector_decision_section(
                 experiment, results.get("limits") or {},
                 (round_entry or {}).get("injector_decision"),
@@ -1322,7 +1518,7 @@ def render(results, graph, previous=None):
                 + "</p>"
                 if experiment.get("ai_diagnosis") else ""
             )
-            + (
+            + ("" if not (experiment.get("root_cause_hypotheses") or experiment.get("analyst_evidence")) else (
                 "<div class='agent-panel'><h3>Analyst Agent evidence &amp; hypotheses</h3>"
                 + (
                     "<p><b>Root-cause hypotheses:</b></p><ul class='reason-list'>"
@@ -1338,9 +1534,9 @@ def render(results, graph, previous=None):
                     if experiment.get("analyst_evidence") else
                     "<p class='muted'>No separate analyst evidence list was recorded; use the measured phase data below.</p>"
                 )
-                + f"<p><b>Analyst source:</b> {e(str((experiment.get('agent_provenance') or {}).get('analyst', {}).get('source', experiment.get('analyst', 'Not recorded'))))}</p>"
+                + f"<p><b>Analyst source:</b> {e(_source_label((experiment.get('agent_provenance') or {}).get('analyst', {}).get('source', experiment.get('analyst'))))}</p>"
                 "</div>"
-            )
+            ))
             + timeline_svg(
                 experiment.get("samples"), events=experiment.get("events"),
                 phase_samples=experiment.get("phase_samples")
@@ -1353,8 +1549,8 @@ def render(results, graph, previous=None):
             "<span class='legend-item'><span class='legend-marker' style='--marker:var(--red)'>×</span>Failed probe</span>"
             "<span class='legend-item'><span class='legend-marker' style='--marker:var(--muted)'>┆</span>Fault boundary</span>"
             "</div>"
-            "<div class='section-head'><h3>Four-phase measurements</h3>"
-            "<span class='section-note'>Latency percentiles use successful requests only</span></div>"
+            + experiment_conclusion(experiment, baseline)
+            + "<details><summary>Measurements: four phases, impact, recovery and score breakdown</summary>"
             + phase_comparison(
                 experiment.get("phase_metrics"), experiment.get("phase_samples"),
                 experiment.get("recovery_s")
@@ -1362,9 +1558,7 @@ def render(results, graph, previous=None):
             + "<div class='insight-grid'>"
             + impact_section(experiment, baseline)
             + recovery_section(experiment)
-            + "</div><h3>Measured conclusion</h3>"
-            + experiment_conclusion(experiment, baseline)
-            + "<details><summary>Experiment actions and score breakdown</summary>"
+            + "</div>"
             f"<p class='muted'>Recorded score penalties (errors / latency / recovery / abort): "
             f"{e(str((experiment.get('breakdown') or {}).get('errors', 'N/A')))} / "
             f"{e(str((experiment.get('breakdown') or {}).get('latency', 'N/A')))} / "
@@ -1373,20 +1567,6 @@ def render(results, graph, previous=None):
             + (
                 f"<p>Guard abort latency: {_number(experiment.get('abort_latency_s')):.2f} s.</p>"
                 if _number(experiment.get("abort_latency_s")) is not None else ""
-            )
-            + (
-                "<h4>Recorded recommendations for this experiment</h4>"
-                + "".join(
-                    f"<div class='recommendation'><b>{e(str(item.get('title', 'Recommendation')))}</b>"
-                    f"<p>{e(str(item.get('detail', '')))}</p></div>"
-                    for item in experiment.get("recommendations") or []
-                    if item.get("title") != "Safety limit stopped this experiment"
-                )
-                if any(
-                    item.get("title") != "Safety limit stopped this experiment"
-                    for item in experiment.get("recommendations") or []
-                ) else
-                "<p class='muted'>No recommendations were saved for this experiment.</p>"
             )
             + "</details></article>"
         )
