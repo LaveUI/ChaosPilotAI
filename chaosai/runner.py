@@ -60,7 +60,7 @@ def phase_stats(samples):
     }
 
 
-def collect_phase(env, cfg, seconds, phase, origin, stop_file=None):
+def collect_phase(env, cfg, seconds, phase, origin, on_progress=None, stop_file=None):
     """Collect probe samples for a fixed observation window."""
 
     samples = []
@@ -71,12 +71,15 @@ def collect_phase(env, cfg, seconds, phase, origin, stop_file=None):
             raise RuntimeError("Manual stop requested during baseline measurement.")
         ok, ms = env.probe()
 
-        samples.append([
+        sample = [
             round(env.now() - origin, 2),
             int(ok),
             round(ms, 2),
             phase,
-        ])
+        ]
+        samples.append(sample)
+        if on_progress:
+            on_progress({"phase": phase, "event": "sample", "sample": sample})
 
         env.sleep(cfg["probe_interval_s"])
 
@@ -87,7 +90,7 @@ def measure_baseline(cfg, env, seconds, stop_file=None):
     """Preserve the existing baseline CLI interface."""
 
     samples = collect_phase(
-        env, cfg, seconds, "before", env.now(), stop_file
+        env, cfg, seconds, "before", env.now(), stop_file=stop_file
     )
 
     stats = phase_stats(samples)
@@ -109,7 +112,7 @@ def latency_change_pct(before, other):
     return round((other - before) / before * 100, 2)
 
 
-def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
+def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None, on_progress=None):
     """Run Before -> During -> Recovery -> After.
 
     on_sample: optional callback, called about every `agent_review_every_samples` probes while the
@@ -144,9 +147,11 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
     origin = env.now()
 
     print(f"  BEFORE: measuring for {before_seconds}s")
+    if on_progress:
+        on_progress({"phase": "before", "event": "started"})
 
     before = collect_phase(
-        env, cfg, before_seconds, "before", origin
+        env, cfg, before_seconds, "before", origin, on_progress
     )
 
     phase_samples["before"] = before
@@ -185,6 +190,8 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
     # ---------------------------------------
 
     print("  DURING: injecting controlled failure")
+    if on_progress:
+        on_progress({"phase": "injecting", "event": "started"})
 
     window = deque(maxlen=safety["window"])
 
@@ -246,6 +253,12 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
                 if reason:
                     aborted = True
                     print(f"  SAFETY ABORT: {reason}")
+                    if on_progress:
+                        on_progress({
+                            "phase": "during", "event": "safety_abort",
+                            "error_rate": round(err, 3), "p95_ms": round(latency),
+                            "extra_unhealthy_pods": extra, "warning": reason,
+                        })
                     break
 
                 if on_sample and i % review_every == 0:
@@ -261,15 +274,31 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
                         agent_rollback = str(agent_rollback)[:400]
                         print(f"  AGENT ROLLBACK: {agent_rollback}")
                         break
+            if on_progress:
+                on_progress({
+                    "phase": "during", "event": "sample",
+                    "sample": sample,
+                    "error_rate": round(window_stats(window)[0], 3) if window else None,
+                    "p95_ms": round(window_stats(window)[1]) if window else None,
+                    "extra_unhealthy_pods": extra,
+                })
 
             env.sleep(interval)
 
     finally:
         print("  Removing injected fault...")
+        if on_progress:
+            on_progress({"phase": "cleanup_pending", "event": "started"})
 
         cleanup_start = time.perf_counter()
 
         cleanup_confirmed = env.delete(exp, path)
+        if on_progress:
+            on_progress({
+                "phase": "cleanup_verified" if cleanup_confirmed else "cleanup_pending",
+                "event": "finished",
+                "cleanup_confirmed": cleanup_confirmed,
+            })
 
         if aborted:
             abort_latency = (
@@ -288,6 +317,8 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
     # ---------------------------------------
 
     print("  RECOVERY: checking stabilization")
+    if on_progress:
+        on_progress({"phase": "recovery", "event": "started"})
 
     rec_start = env.now()
     streak = 0
@@ -312,6 +343,8 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
 
         samples.append(sample)
         phase_samples["recovery"].append(sample)
+        if on_progress:
+            on_progress({"phase": "recovery", "event": "sample", "sample": sample})
 
         if ok and ms <= latency_limit:
             streak += 1
@@ -343,7 +376,7 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
         )
 
         after = collect_phase(
-            env, cfg, after_seconds, "after", origin
+            env, cfg, after_seconds, "after", origin, on_progress
         )
 
         phase_samples["after"] = after
@@ -358,6 +391,8 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
     # ---------------------------------------
     # ANALYSIS
     # ---------------------------------------
+    if on_progress:
+        on_progress({"phase": "analyzing", "event": "started"})
 
     phase_metrics = {
         name: phase_stats(values)
@@ -422,7 +457,7 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
     # RESULT: backward-compatible fields
     # ---------------------------------------
 
-    return {
+    result = {
         **{
             k: exp[k]
             for k in (
@@ -460,6 +495,11 @@ def run_experiment(exp, cfg, env, baseline, guard, run_dir, on_sample=None):
         "cleanup_confirmed": cleanup_confirmed,
         "agent_rollback": agent_rollback,
     }
+
+    if on_progress:
+        on_progress({"phase": "completed", "event": "finished", "cleanup_confirmed": cleanup_confirmed})
+
+    return result
 
 
 def run_plan(plan, cfg, env, baseline, run_dir, stop_file):

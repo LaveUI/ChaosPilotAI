@@ -1,12 +1,7 @@
 services:
   - type: web
     name: chaospilot-demo
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m chaosai --sim dashboard --public-sim --port $PORT
-    healthCheckPath: /healthz
-    autoDeploy: true
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.10
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health

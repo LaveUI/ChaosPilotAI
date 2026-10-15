@@ -72,18 +72,24 @@ def heuristic_plan(graph, cfg, history, n):
     return picks
 
 
-def _validate_llm(raw, graph, cfg, n):
+def _validate_llm(raw, graph, cfg, n, requested_experiment=None):
     nodes = _by_name(graph)
     picks, seen = [], set()
     for e in raw.get("experiments", []):
         svc, act = e.get("service"), e.get("action")
-        if svc in nodes and svc not in cfg["exclude_services"] and act in cfg["allowlist"] and svc not in seen:
+        requested_matches = (
+            requested_experiment is None
+            or (svc, act) == (requested_experiment["service"], requested_experiment["action"])
+        )
+        if (requested_matches and svc in nodes and svc not in cfg["exclude_services"]
+                and act in cfg["allowlist"] and svc not in seen):
             seen.add(svc)
             picks.append({"service": svc, "action": act, "rationale": str(e.get("rationale", ""))[:400]})
     return picks[:n]
 
 
-def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metadata=None):
+def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metadata=None,
+         requested_experiment=None):
     if mode not in {"auto", "llm", "local", "rule-based"}:
         raise ValueError(f"Unknown planner mode: {mode}")
     if mode == "local":
@@ -99,13 +105,19 @@ def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metad
         try:
             payload = {"graph": graph, "allowlist": cfg["allowlist"], "excluded": cfg["exclude_services"],
                        "already_tested": history, "count": n}
+            if requested_experiment:
+                payload["requested_experiment"] = {
+                    "service": requested_experiment["service"],
+                    "action": requested_experiment["action"],
+                    "instruction": "Only propose this exact service and fault type.",
+                }
             if observation:
                 payload["observation"] = observation
             picks = _validate_llm(
                 llm.ask_json(
                     cfg, SYSTEM, payload, schema=llm.PLANNER_SCHEMA, metadata=llm_metadata
                 ),
-                graph, cfg, n,
+                graph, cfg, n, requested_experiment,
             )
             if picks:
                 return {"planner": "llm", "llm_model": llm.model_name(cfg),
@@ -117,4 +129,13 @@ def plan(graph, cfg, history=None, n=3, mode="auto", observation=None, llm_metad
             if explicit_llm:
                 raise RuntimeError(f"LLM planner failed ({exc.__class__.__name__}): {exc}") from exc
             print(f"LLM planner failed ({exc.__class__.__name__}); using rule-based planner.")
-    return {"planner": "rule-based", "experiments": _finalize(heuristic_plan(graph, cfg, history, n), graph, cfg)}
+    if requested_experiment:
+        service, action = requested_experiment["service"], requested_experiment["action"]
+        nodes = _by_name(graph)
+        if service not in nodes or service in cfg["exclude_services"] or action not in cfg["allowlist"]:
+            raise ValueError("Requested experiment is not allowed by the service graph and configured safety policy.")
+        picks = [{"service": service, "action": action,
+                  "rationale": "Operator-selected experiment, validated against the dependency map and allowlist."}]
+    else:
+        picks = heuristic_plan(graph, cfg, history, n)
+    return {"planner": "rule-based", "experiments": _finalize(picks, graph, cfg)}

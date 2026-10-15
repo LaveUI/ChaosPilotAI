@@ -89,7 +89,8 @@ class DashboardTests(unittest.TestCase):
     def test_render_blueprint_does_not_require_dashboard_password(self):
         with open(os.path.join(ROOT, "render.yaml"), encoding="utf-8") as source:
             blueprint = source.read()
-        self.assertIn("--sim dashboard --public-sim --port $PORT", blueprint)
+        self.assertIn("runtime: docker", blueprint)
+        self.assertIn("healthCheckPath: /api/health", blueprint)
         self.assertNotIn("CHAOSPILOT_DASHBOARD_PASSWORD", blueprint)
 
     def test_dashboard_experiment_uses_allowlist_and_protected_services(self):

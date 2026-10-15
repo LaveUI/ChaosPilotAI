@@ -111,9 +111,64 @@ To regenerate: `python3 -m chaosai map` writes `graph.json` and `graph.mmd`. Man
 
 ## Quick start
 
-On Windows, use `python` in place of `python3`.
+### Local dashboard
 
-### 1. Try it without a cluster (offline simulator)
+Install the API and frontend dependencies once:
+
+```bash
+python3 -m pip install -r requirements.txt
+cd frontend && npm install
+```
+
+Then start these in separate terminals from the repository root:
+
+```bash
+python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+cd frontend && npm run dev
+```
+
+Open `http://127.0.0.1:5173`. Demo mode uses saved simulated results. Switching to the live-cluster
+view runs read-only Kubernetes diagnostics. Starting any experiment requires a reviewed preview;
+live experiments additionally require a saved baseline, explicit confirmation, and an exact match
+between `CHAOSAI_APPROVED_CONTEXT` and the current `kubectl` context. Keep live chaos tests limited
+to a cluster you are authorized to test. The dashboard never runs `kubectl` in the browser. The API
+root at `http://127.0.0.1:8000/` lists its docs and health URLs; interactive API docs are at
+`http://127.0.0.1:8000/docs`.
+
+### Free public demo on Render
+
+The root `Dockerfile` builds React and serves it alongside FastAPI at one URL.
+`backend.public_demo:app` is a read-only entry point: it rejects all mutations and
+live-cluster queries. The frontend is built with `VITE_PUBLIC_DEMO=true`, which
+locks the live controls and experiment buttons. The normal local API is unchanged.
+The image generates three fresh, rule-based simulation rounds during its build;
+it does not copy local run history, credentials, or environment files.
+
+1. Commit and push the dashboard source, `Dockerfile`, `.dockerignore`,
+   `requirements-demo.txt`, and `render.yaml` to your GitHub repository.
+2. At https://dashboard.render.com, choose **New → Blueprint**, connect the
+   repository, and select the branch containing these changes.
+3. Review the `chaospilot-demo` service and confirm its plan is **Free**, then deploy.
+4. Open the assigned HTTPS URL. `/api/health` should return `{"status":"ok"}`.
+
+No Gemini key, kubeconfig, paid database, or persistent disk is required.
+Render's free service sleeps after 15 minutes without traffic; the first visit
+can take about a minute. Build-generated demo data is included in the image and
+returns on restart. This deployment intentionally cannot create new experiments.
+See https://render.com/docs/free for current free-tier limits.
+
+To verify the same deployment locally (port 8001 avoids the development API):
+
+```bash
+docker build -t chaospilot-demo .
+docker run --rm -p 127.0.0.1:8001:8000 chaospilot-demo
+# Open http://127.0.0.1:8001
+```
+
+### Try it without a cluster (offline simulator)
 
 ```bash
 pip install -r requirements.txt
@@ -208,21 +263,10 @@ activity, experiment outcomes, and saved run history. Live metrics are limited t
 application tracing, business metrics, or CPU/memory monitoring.
 
 The normal dashboard binds to loopback only and must not be exposed directly to the public internet.
-The Render Blueprint in `render.yaml` deploys a **public, simulation-only** dashboard with no login;
-it cannot connect to Kubernetes or inject real faults. Anyone who can reach the URL can run
-simulated experiments. Public agent runs are limited to three rounds and use rule-based decisions.
-
-### Deploy the simulator to Render
-
-1. Push this repository, including `render.yaml`, to GitHub.
-2. In Render, choose **New → Blueprint**, connect `LaveUI/ChaosPilotAI`, and deploy the Blueprint.
-3. Deploy, then open the service's `onrender.com` URL directly; no login is required.
-
-Render builds with `pip install -r requirements.txt` and starts
-`python -m chaosai --sim dashboard --public-sim --port $PORT`. The free web service may spin down
-when idle, and its run history is written on the server's temporary filesystem. It is lost when the
-service restarts or redeploys. Local `runs/` data is git-ignored and is not copied to Render. Use an
-upgraded plan and persistent storage if you need run history to survive restarts.
+The Render Blueprint in `render.yaml` deploys the **read-only React demo** described in
+[Free public demo on Render](#free-public-demo-on-render). It serves build-generated simulation
+results and reports; public visitors cannot run experiments or connect to Kubernetes.
+The interactive CLI dashboard above remains available locally.
 
 A public live control plane is not included. A free hosted web service cannot reach a Kubernetes
 cluster running on your laptop. To control a real cluster remotely, first deploy an authenticated,
