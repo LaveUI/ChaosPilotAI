@@ -51,6 +51,8 @@ class KubeEnv:
     def delete_all_chaos(self):
         r = _kubectl("delete", "podchaos,networkchaos,stresschaos", "-n", self.ns,
                      "-l", "app.kubernetes.io/managed-by=chaosai", "--ignore-not-found", check=False)
+        if r.returncode != 0:
+            raise RuntimeError(f"Failed to remove ChaosPilot-managed faults: {r.stderr.strip()}")
         return r.stdout + r.stderr
 
     def unhealthy_count(self):

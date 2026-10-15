@@ -11,7 +11,8 @@ target_urls:
 baseline_seconds: 60
 experiment_duration_s: 60
 recovery_timeout_s: 120
-cooldown_s: 10
+cooldown_s: 60
+agent_review_every_samples: 1000
 
 # The ONLY actions the planner may choose from
 allowlist: [pod-failure, network-delay, cpu-stress]

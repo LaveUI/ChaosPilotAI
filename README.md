@@ -1,9 +1,9 @@
 # ChaosPilot AI: AI-driven chaos engineering for cloud-native resilience
 
-A system that **maps** a cloud-native app, **plans** controlled failures, **injects** them with safety
-limits, **observes** the impact, then **scores** resilience and **recommends fixes**. Five agents
-(Observer, Planner, Injector, Analyst, Reporter) run as a LangGraph state graph, and each round uses
-the results of the rounds before it.
+ChaosPilot AI finds the weak points of a cloud-native application by breaking it on purpose, safely.
+Five AI agents **observe** the application, **decide** what to break, **inject** the failure,
+**roll it back**, **explain** what happened, **recommend fixes** and **rank** the weaknesses, while
+plain code enforces the safety limits.
 
 Built for the Bosch hackathon problem statement "AI-Driven Chaos Engineering for Cloud-Native Resilience".
 
@@ -11,10 +11,10 @@ Built for the Bosch hackathon problem statement "AI-Driven Chaos Engineering for
 |---|---|
 | Sample app | [Google Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo) (12 microservices, Apache-2.0) |
 | Sandbox | Local Kubernetes cluster with [kind](https://kind.sigs.k8s.io/) |
-| Fault injection | [Chaos Mesh](https://chaos-mesh.org/) |
+| Fault injection | [Chaos Mesh](https://chaos-mesh.org/), driven by the Injector agent |
+| Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) state graph |
+| LLM | Google Gemini or local Ollama |
 | Language | Python 3.10+ |
-| Agent orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) state graph, with a Python-loop fallback |
-| LLM | Google Gemini through LangChain or the Google Gen AI SDK; rule-based fallback is recorded |
 
 ## How it works
 
@@ -29,22 +29,62 @@ graph LR
   reporter --> done([report.html + results.json])
 ```
 
-Each round:
+Before the agents start, two commands prepare the ground: `map` builds the dependency map from the
+Kubernetes manifests, and `baseline` measures the normal error rate and latency.
 
-1. **Observer** reads the whole app: HTTP probes, deployments, pods, restarts, warning events and logs.
-2. **Planner** ranks candidate experiments from the dependency map, the observation and earlier results, and picks one.
-3. **Injector** decides whether to inject now and for how long, injects through Chaos Mesh, and can roll the fault back early.
-4. **Analyst** scores the result, diagnoses what happened and recommends fixes.
+Then each round runs four agents in order:
 
-After the last round, the **Reporter** ranks all weaknesses by severity and explains the overall score.
+1. **Observer** reads the whole application: live requests, every deployment and pod, restarts, warning events and logs.
+2. **Planner** ranks five candidate experiments using the dependency map, the Observer's report and earlier results, and picks the top one not yet tested.
+3. **Injector** decides whether to inject now and for how long, applies the fault through Chaos Mesh, watches it, and removes it.
+4. **Analyst** explains what the failure revealed, sets its severity and recommends fixes.
 
-Between the agents and the cluster sits a safety supervisor in plain code: the allowlist, the protected
-services, the duration limits and the automatic abort. The agents decide, and the code enforces the limits.
-A full diagram is in `docs/architecture.html`.
+After the last round the **Reporter** ranks all weaknesses by severity and explains the resilience score.
+The full diagram is in `docs/architecture.html`.
+
+## The agents
+
+All five are in `chaosai/agents.py`. They are nodes of one LangGraph state graph built in `run_agents`.
+
+| Agent | Decides | Reads | Acts through |
+|---|---|---|---|
+| **Observer** | Is the app healthy enough to test, and which services already look unhealthy | HTTP probes, deployments, pods, restarts, warning events, logs | Kubernetes read access |
+| **Planner** | A ranked list of candidate experiments and which one runs next | Dependency map, Observer's report, earlier results | The allowlist of faults |
+| **Injector** | Inject now or not, for how long, and whether to roll back early | Pre-flight probes, live readings during the fault | Chaos Mesh |
+| **Analyst** | Cause, severity and fixes for each experiment | Before, during, recovery and after measurements | The score formula |
+| **Reporter** | Order of all weaknesses by severity, and what the score means | Every experiment's result and diagnosis | The HTML report |
+
+### What the AI decides and what the code decides
+
+| Decided by the selected model | Always decided by code |
+|---|---|
+| What to observe and how to describe it | Probe measurements, error rates and latency |
+| Which service to break, with which fault, in what order | Which faults exist (the allowlist) and which services are protected |
+| Whether and how long to inject, and early rollback | Duration limits and the automatic abort |
+| Diagnosis, severity and fixes | The resilience score formula |
+| Ranking and summary | Deleting the fault on every exit path |
+
+Every answer from the model is validated against the allowlist, the dependency map and the protected
+services before anything runs.
+
+This is not complete knowledge of the website. The Observer sees the configured HTTP probes and
+Kubernetes snapshots (deployments, pods, restarts, warning events, and selected logs); the Planner
+also gets the dependency map and earlier experiment results. The agents do not automatically inspect
+every browser interaction, database query, distributed trace, cloud metric, or business outcome.
+Model-based explanations are limited to the evidence passed into that run, and rule-based mode
+does not use an LLM at all.
+
+### Rule-based mode
+
+Each agent also has a rule-based version of its decision, so the same pipeline runs without a model:
+`--planner rule-based`. For example, the Planner scores every allowed service and fault pair: +3 per
+service relying on it, +4 for a single replica, +5 for a fault type not tried yet, -3 per earlier
+test on that service, -6 if the service is already confirmed weak. The report always states, per
+agent, whether a decision came from the selected model or from the rules.
 
 ## Dependency map
 
-The mapper builds this automatically from the app's Kubernetes manifests: 12 services and 16 dependencies.
+The mapper builds this from the app's Kubernetes manifests: 12 services and 16 dependencies.
 
 ```mermaid
 graph LR
@@ -66,9 +106,8 @@ graph LR
   recommendationservice --> productcatalogservice
 ```
 
-`productcatalogservice` and `redis-cart` each have four services relying on them, directly or indirectly,
-so the Planner targets them first. To regenerate: `python3 -m chaosai map` writes `graph.json` and
-`graph.mmd`. Manual corrections go in `graph_overrides` in `config.yaml`.
+To regenerate: `python3 -m chaosai map` writes `graph.json` and `graph.mmd`. Manual corrections go in
+`graph_overrides` in `config.yaml`.
 
 ## Quick start
 
@@ -136,39 +175,13 @@ pip install -r requirements.txt
 python3 -m unittest discover -s tests
 python3 -m chaosai --sim map
 python3 -m chaosai --sim baseline --seconds 15
-python3 -m chaosai --sim agent --rounds 1 --planner rule-based
-```
-Open the newest `runs/*/report.html`. On Windows, use `python` in place of `python3`.
-The simulator is a toy model for development; its numbers are not real results.
-A pre-generated example report is in `docs/sample-report.html`.
-
-### Gemini-powered simulation
-
-This stays offline from Kubernetes: `--sim` selects the simulator, while `--planner llm`
-requests Gemini for agent decisions. Install the requirements, then enter the key without placing it
-in shell history or committing it:
-
-```bash
-read -s -p "Gemini API key: " GEMINI_API_KEY
-export GEMINI_API_KEY
-printf '\n'
-python3 -m chaosai --sim map
-python3 -m chaosai --sim baseline --seconds 15
-python3 -m chaosai --sim agent --rounds 1 --planner llm
+python3 -m chaosai --sim agent --rounds 3 --planner rule-based
 ```
 
-The model is selected from `config.yaml` and can be overridden with `CHAOSAI_MODEL`. Gemini
-responses use structured JSON output; transient service errors receive bounded retries. When
-Gemini remains unavailable or returns unusable content, the affected decision may use explicit
-rule-based fallback. The generated results/report identify Gemini use and fallbacks. A quota
-exhaustion response cannot be fixed by retrying repeatedly; wait for the quota reset or check the
-Gemini project quota and billing.
+Open the newest `runs/<id>/report.html`. The simulator is a toy model for development; its numbers
+are not real results.
 
-### Real Kubernetes experiments
-
-These commands can inject actual faults. **Do not run them against a cluster unless you have
-permission and have reviewed the target, duration, allowlist, and safety limits.** This task does
-not run live experiments.
+### 2. Set up the real cluster
 
 Prerequisites: Docker, kind, kubectl, helm, Python 3.10+, and about 8 GB of free memory for Docker.
 
@@ -186,137 +199,96 @@ kubectl get pods                                    # repeat until all 12 are Ru
 helm repo add chaos-mesh https://charts.chaos-mesh.org
 helm repo update
 helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock
-kubectl port-forward deployment/frontend 8080:8080  # separate terminal, keep running
 ```
 
-Before proceeding, check the current Kind context, all app deployments, Chaos Mesh, and the
-frontend port-forward:
-
-```bash
-kubectl config current-context
-kubectl get deployments,pods
-kubectl get pods -n chaos-mesh
-curl -fsS http://localhost:8080/ >/dev/null && echo "Frontend probe succeeded"
-```
-
-If the frontend check fails, keep the port-forward in a separate terminal:
+Then, in a separate terminal that stays open:
 
 ```bash
 kubectl port-forward deployment/frontend 8080:8080
 ```
 
-After confirming the cluster and configured safety controls, map the services, take a live
-baseline, and review the generated plan before approving a fault-injection run:
+Check that `http://localhost:8080` shows the shop.
+
+### 3. Run the agents on the cluster
+
+Set the Gemini key as an environment variable. Never put it in a file in this repository.
 
 ```bash
+export GEMINI_API_KEY=your-key            # PowerShell: $env:GEMINI_API_KEY = "your-key"
 python3 -m chaosai map
 python3 -m chaosai baseline --seconds 60
-python3 -m chaosai plan --n 3 --planner rule-based
-cat plan.json
-# Only after reviewing and explicitly approving the planned real faults:
-python3 -m chaosai run --plan plan.json
+python3 -m chaosai agent --rounds 3 --planner llm
 ```
 
-### Monitor faults you inject yourself (local Ollama)
-
-The `monitor` command is separate from `agent`: it does not inject faults. It continuously checks the
-configured HTTP URLs and Kubernetes deployment/pod health, warning events, and recent logs for
-unhealthy pods. On an incident it asks the local Ollama model for a diagnosis. It can offer a
-human-approved scale-up only for an affected, stateless app deployment; it will not scale Redis or
-protected services. No change is made unless you type `yes`. Incident records are appended to
-`runs/monitor/incidents.jsonl`.
-The monitor keeps Ollama's model loaded for 10 minutes after a diagnosis and limits generated output
-to keep incident responses concise; adjust `keep_alive`, `num_ctx`, and `num_predict` under
-`local_agent` if needed. The console shows when diagnosis starts and how long it took. A smaller
-Ollama model can be selected in config for faster responses on CPU, with a possible quality trade-off.
-
-Install/start Ollama and download the configured model:
-
-```bash
-ollama pull qwen2.5:3b
-ollama serve                         # only if Ollama is not already running
-```
-
-Keep the frontend port-forward running in another terminal, then start the monitor:
-
-```bash
-python3 -m chaosai map
-python3 -m chaosai baseline --seconds 30
-python3 -m chaosai monitor
-```
-
-Leave the monitor running while you manually inject a fault through the Chaos Mesh dashboard or
-`kubectl`. Stop it with Ctrl+C. The monitor needs Kubernetes read access to deployments, pods,
-warning events, and logs; approving a scale-up also requires permission to scale a deployment.
-
-### Turning on the LLM
-
-To use Gemini agents against a real cluster, first satisfy the real-cluster checks above. Avoid
-putting a key directly into a command:
-
-```bash
-read -s -p "Gemini API key: " GEMINI_API_KEY
-export GEMINI_API_KEY
-printf '\n'
-python3 -m chaosai agent --rounds 1 --planner llm
-```
+The first output line names the agents and the orchestrator, for example
+`Agents (llm): observer, planner, injector, analyst, reporter. Orchestrator: LangGraph state graph.`
 
 | `--planner` value | Behaviour |
 |---|---|
-| `auto` (default) | Use Gemini when configured and available; otherwise use the local rules |
-| `llm` | Request Gemini; transient API failure or unusable output is reported and can fall back to rules |
-| `rule-based` | Agents use the local rules only |
+| `auto` (default) | Gemini when a key is set, otherwise the rules |
+| `llm` | Gemini; the run stops at the start if no key or client library is found |
+| `local` | Local Ollama model configured under `local_agent`; no API key required |
+| `rule-based` | Rules only, no model calls |
 
-If quota/rate limits prevent Gemini calls, check the returned retry guidance and your AI Studio
-quota; repeated requests do not restore an exhausted quota. The report labels Gemini, mixed, or
-rule-based decisions separately from the Kubernetes/simulator environment. Set
-`CHAOSAI_LLM_BACKEND=google-genai` to use Google's SDK instead of LangChain. Without LangGraph,
-the same agent steps run in a Python loop.
+For local mode, start Ollama and pull the configured model (default: `ollama pull qwen2.5:3b`), then run
+`python3 -u -m chaosai agent --rounds 1 --planner local`. The model name comes from
+`local_agent.model` in `config.yaml`. Gemini uses `llm.model`; override it with `CHAOSAI_MODEL`.
+
+### 4. Apply a fix and verify it
+
+```bash
+python3 -m chaosai fix        # applies the safe automatic fixes from the last run
+python3 -m chaosai rerun      # repeats the same experiments and compares the scores
+```
+
+### 5. Use the interactive control dashboard
+
+Start the dashboard once, then use its browser controls for baseline measurement, allowlisted
+fault experiments, agent runs, validated safe fixes, safe stop, and emergency cleanup:
+
+```bash
+python3 -m chaosai dashboard
+```
+
+Open `http://127.0.0.1:8765`. For a no-cluster UI demo, start it in simulator mode instead:
+
+```bash
+python3 -m chaosai --sim dashboard
+```
+
+Measure a baseline before starting a fault experiment or agent run. The dashboard shows probe
+success and latency, mapped service health, deployment readiness, warning events, current agent
+activity, experiment outcomes, and saved run history. Live metrics are limited to the URLs in
+`target_urls` and Kubernetes data already collected by ChaosPilot; this is not a replacement for
+application tracing, business metrics, or CPU/memory monitoring.
+
+The normal dashboard binds to loopback only and must not be exposed directly to the public internet.
+The Render Blueprint in `render.yaml` deploys the **read-only React demo** described in
+[Free public demo on Render](#free-public-demo-on-render). It serves build-generated simulation
+results and reports; public visitors cannot run experiments or connect to Kubernetes.
+The interactive CLI dashboard above remains available locally.
+
+A public live control plane is not included. A free hosted web service cannot reach a Kubernetes
+cluster running on your laptop. To control a real cluster remotely, first deploy an authenticated,
+narrowly permissioned cluster-side connector with a private outbound connection; do not expose the
+Kubernetes API or the local control dashboard directly to the public internet.
 
 ## Commands
 
-| Command | What it does | Slide milestone |
-|---|---|---|
-| `map` | Parses manifests into `graph.json` + `graph.mmd` | Application mapping |
-| `baseline` | Measures normal error rate and p95 latency | Monitoring baseline |
-| `agent --rounds 3` | Agent graph: observe, plan, inject and analyze one experiment per round, then rank the findings | Plan, inject, observe, analyze, report |
-| `monitor` | Observe manually injected faults and request local Ollama diagnosis | External fault monitoring |
-| `plan --n 3` | Chooses a fixed list of experiments and explains why | Plan experiments |
-| `run` | Runs a saved plan with safety limits, scores it, writes the HTML report | First failure, safety controls |
-| `fix` | Applies safe automatic fixes (scale to 2 replicas) from the last run | Recommend fixes |
-| `rerun` | Re-runs the same plan and compares to the previous score | Verify the fix |
-| `report` | Regenerates a report | Analyze and report |
-| `kill` | Panic button: stops the session and deletes all chaosai experiments | Safety controls |
+| Command | What it does |
+|---|---|
+| `map` | Parses the manifests into `graph.json` and `graph.mmd` |
+| `baseline` | Measures the normal error rate and latency |
+| `agent --rounds N` | Runs the five agents for N rounds and writes the report |
+| `fix` | Applies the safe automatic fixes (scale a stateless service to 2 replicas) from the last run |
+| `rerun` | Repeats the last experiments and compares scores with the previous run |
+| `report` | Regenerates the HTML report of a run |
+| `kill` | Panic button: stops the session and deletes all chaosai faults |
+| `plan --n N`, `run` | Without the agent loop: save a fixed list of experiments, then run it |
+| `monitor` | Separate watcher: diagnoses faults you inject yourself, using a local Ollama model |
+| `dashboard` | Open the local browser control dashboard |
 
-Add `--sim` before the command to use the offline simulator, for example
-`python3 -m chaosai --sim agent --rounds 1 --planner rule-based`.
-
-To open the newest generated report on Linux:
-
-```bash
-latest_report=$(ls -t runs/*/report.html | head -n 1)
-xdg-open "$latest_report"
-```
-
-## The agents
-
-All five are in `chaosai/agents.py`, wired together in `run_agents`.
-
-| Agent | Decides | Reads |
-|---|---|---|
-| **Observer** | Whether the app is healthy enough to test, and which services already look unhealthy | HTTP probes, deployments, pods, restarts, warning events, logs |
-| **Planner** | A ranked list of five candidate experiments, and which one runs next | Dependency map, the Observer's report, earlier results |
-| **Injector** | Whether to inject now, for how long, and whether to roll back early | Pre-flight probes, live readings during the fault, safety limits |
-| **Analyst** | What the failure revealed, its severity, and the recommended fixes | Before, during, recovery and after measurements; cluster state during the fault |
-| **Reporter** | The ranking of all weaknesses by severity, and what the score means | Every experiment's result, score and diagnosis |
-
-With a Gemini key, each agent asks the model for its decision and the code validates the answer before
-using it. Without a key, each agent uses transparent rules. For example, the Planner scores every allowed
-pair: +3 per service relying on it, +4 for a single replica, +5 for a failure type not tried yet, -3 per
-earlier test on that service, -6 if the service is already confirmed weak.
-
-The model never controls these: the allowed failure types, the protected services, the duration limits,
-the automatic abort and the score formula.
+Add `--sim` before the command to use the offline simulator.
 
 ## Failures injected
 
@@ -326,19 +298,21 @@ the automatic abort and the score formula.
 | `network-delay` | NetworkChaos | 500 ms latency (50 ms jitter) on the service |
 | `cpu-stress` | StressChaos | 2 CPU workers at 90% load in one pod |
 
-Each experiment targets one service and lasts up to 60 seconds. The Injector may choose a shorter
-duration, never below 15 seconds. Settings are in `config.yaml`.
+Each experiment targets one service for at most 60 seconds. The Injector may choose a shorter
+duration, never below 15 seconds.
 
 ## Safety design
 
-1. **Allowlist.** Only `pod-failure`, `network-delay` and `cpu-stress` exist in `chaos.py`. Anything else raises an error.
-2. **LLM proposes, code disposes.** Every LLM suggestion is validated against the allowlist, the dependency graph and the exclusion list before it can run.
-3. **Small blast radius.** One service per experiment, `mode: one` for pod and CPU faults, a fixed duration so Chaos Mesh also expires faults on its own, and `frontend`/`loadgenerator` are never targeted.
-4. **Pre-flight check.** The Injector agent refuses to start if the app is already unhealthy, and the Planner never targets a service the Observer reported as unhealthy.
-5. **Automatic abort** on rolling error rate, p95 latency, or number of newly unhealthy pods (`safety:` in `config.yaml`). The time taken to remove the fault is measured and shown in the report.
-6. **Agent rollback.** While a fault is active, the Injector agent reviews the readings and can remove the fault early. The guard in step 5 is always checked first and cannot be overridden.
-7. **Manual kill switch:** Ctrl+C, `python3 -m chaosai kill`, or `touch runs/STOP`. The fault is always deleted in a `finally` block.
-8. To rehearse the abort for the demo, use the strict test config: `python3 -m chaosai --config config-safety-test.yaml run`.
+1. **Allowlist.** Only the three faults above exist in `chaos.py`. Anything else raises an error.
+2. **The model proposes, the code checks.** Every suggestion is validated against the allowlist, the dependency map and the protected services.
+3. **Small blast radius.** One service per experiment, one pod for pod and CPU faults, a fixed duration so Chaos Mesh also expires the fault itself, and `frontend` and `loadgenerator` are never targeted.
+4. **Pre-flight check.** The Injector refuses to start if the app is unhealthy, and the Planner never targets a service the Observer reported as unhealthy.
+5. **Automatic abort** on rolling error rate, p95 latency or newly unhealthy pods (`safety:` in `config.yaml`). The time taken to remove the fault is measured.
+6. **Agent rollback.** While a fault is active the Injector reviews the readings and can remove it early. The abort in step 5 is checked first and cannot be overridden.
+7. **Manual kill switch.** Ctrl+C, `python3 -m chaosai kill`, `touch runs/STOP`, or the dashboard's **Stop safely** and **Emergency stop** buttons. The active fault is removed in a `finally` block.
+
+To rehearse the abort, use the strict limits in `config-safety-test.yaml`:
+`python3 -m chaosai --config config-safety-test.yaml agent --rounds 1`.
 
 ## Resilience score
 
@@ -348,63 +322,77 @@ Each experiment scores 100 minus penalties; the overall score is the mean.
 |---|---|---|
 | Errors | 40 | mean error rate during the fault is 50% or more |
 | Latency | 25 | p95 is 10x the baseline p95 or more |
-| Recovery | 25 | recovery takes 60s or more, or never happens |
+| Recovery | 25 | recovery takes 60 s or more, or never happens |
 | Safety abort | 10 | the guard had to stop the experiment |
 
-Weaknesses are the experiments scoring below 90. The score is always calculated by this formula; the
-Reporter agent explains it but cannot change it. Edit the constants at the top of `chaosai/analyzer.py` to tune.
+Experiments scoring below 90 are listed as weaknesses. The score always comes from this formula in
+`chaosai/analyzer.py`; the Reporter explains it but cannot change it.
 
 ## The report
 
-Each run writes `runs/<id>/report.html` and `results.json`. The report shows:
+Each run writes `runs/<id>/report.html` (self-contained, works offline) and `results.json`. The report shows:
 
-- the overall resilience score, and which agents used the LLM
-- weaknesses ranked by severity, with the reason for each
-- a score bar for every experiment
-- for each experiment: the Observer's note, the Planner's ranked candidates, a latency and error timeline
-  across the four phases (before, during, recovery, after), the four-phase measurements, the observed
-  impact, the recovery assessment, the diagnosis and the recommended fixes
-- the dependency map
+- the overall resilience score and the run's key numbers
+- a score bar for every experiment, the points lost by cause, and the findings by severity
+- which agents ran, and whether each decision came from the selected model or the rules
+- for each round: what the Observer saw and the Planner's ranked candidates
+- the Reporter's weaknesses ranked by severity and its explanation of the score
+- the recommended fixes, and the before/after comparison once `fix` and `rerun` have been used
+- the dependency map as a diagram with the tested services highlighted
+- the safety audit: thresholds, aborts and cleanup
+- for each experiment: the Injector's decision, the Analyst's diagnosis and evidence, a latency and
+  error timeline across the four phases (before, during, recovery, after), and the measurements
+
+## Configuration
+
+Settings are in `config.yaml`; every key is optional.
+
+| Key | Meaning |
+|---|---|
+| `target_urls` | Pages the prober requests |
+| `experiment_duration_s`, `cooldown_s` | Longest fault duration, and the pause between rounds |
+| `allowlist`, `exclude_services` | Faults the agents may use, and services they may never target |
+| `safety` | Abort thresholds |
+| `agent_review_every_samples` | How often the Injector reviews a running fault (in probes) |
+| `llm.model` | Gemini model name |
+| `local_agent.model`, `local_agent.ollama_url` | Local Ollama model and loopback server URL |
+| `graph_overrides` | Manual corrections to the dependency map |
 
 ## Project layout
 
 ```
 chaosai/
-  mapper.py    manifests -> dependency graph
-  planner.py   LLM + rule-based experiment planning, with validation
-  agents.py    the five agents and the LangGraph state graph that runs them
-  chaos.py     allowlisted Chaos Mesh manifests
-  guard.py     abort rules
-  runner.py    inject, observe in four phases, recover; hook for agent rollback
-  analyzer.py  score formula and rule-based recommendations
-  report.py    self-contained HTML report
-  env.py       KubeEnv (real cluster, including pod/event/log reading) and SimEnv (offline simulator)
-  llm.py       Gemini through LangChain, with Google's SDK as a fallback
-  config.py    defaults, merged with config.yaml
-  cli.py       commands
-tests/         27 unit tests (mapper, rendering, guard, scoring, planner, simulated runs, all five agents)
-sample/        Online Boutique manifest used when the upstream repo is not cloned
-docs/          architecture page, dependency map, sample report
+  mapper.py       manifests -> dependency map
+  agents.py       the five agents and the LangGraph state graph that runs them
+  planner.py      candidate ranking (selected model and rules) and validation
+  llm.py          Gemini and Ollama clients with structured JSON output
+  runner.py       inject, measure in four phases, recover
+  guard.py        abort rules
+  chaos.py        allowlisted Chaos Mesh manifests
+  analyzer.py     score formula and rule-based recommendations
+  report.py       self-contained HTML report
+  env.py          KubeEnv (real cluster) and SimEnv (offline simulator)
+  local_agent.py  the separate `monitor` command (local Ollama)
+  dashboard.py   local API and simulation-only authenticated public mode
+  dashboard.html multi-page control UI for overview, services, experiments, agents, findings and history
+  config.py       defaults, merged with config.yaml
+  cli.py          commands
+tests/            38 unit tests
+sample/           Online Boutique manifest used when the upstream repo is not cloned
+docs/             architecture diagram, dependency map
 ```
 
 ## Troubleshooting
 
 - **Baseline shows errors:** the port-forward is not running, or pods are not ready (`kubectl get pods`).
 - **Chaos Mesh pods crash on kind:** check the containerd settings in `setup.sh`.
-- **Network delay has no effect:** make sure the `chaos-daemon` pods are running in the `chaos-mesh` namespace.
+- **Network delay has no effect:** check the `chaos-daemon` pods are running in the `chaos-mesh` namespace.
 - **A fault will not go away:** `python3 -m chaosai kill`.
-- **The run says `rule-based` although a key is set:** install the requirements and check `GEMINI_API_KEY` is exported in the same terminal. Use `--planner llm` to see the error.
+- **The first line says `rule-based` although a key is set:** check `GEMINI_API_KEY` is set in the same terminal and the requirements are installed.
 - **The first line says `Python loop`:** LangGraph is not installed. Run `pip install -r requirements.txt`.
-- **The Gemini call fails through LangChain:** set `CHAOSAI_LLM_BACKEND=google-genai` and run again.
 - **A manifest is rejected:** `kubectl apply --dry-run=server -f runs/<id>/<file>.yaml` shows why.
-- **Real-cluster behavior not matching the simulator:** the simulator is a toy model. Trust cluster numbers.
 
 ## Tools and libraries used
 
 Online Boutique (sample app), kind, kubectl, Helm, Chaos Mesh, Python, PyYAML, LangGraph, LangChain
 (`langchain-google-genai`), the Google Gen AI Python SDK (`google-genai`) and the Gemini API.
-
-## Ideas to extend
-
-Alerts before and at the abort point, a checkout probe, a traffic-spike fault, combined failures, a live
-dashboard, Prometheus/OpenTelemetry queries in the guard, more automatic fixes, and scheduled runs in CI.

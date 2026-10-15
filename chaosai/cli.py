@@ -201,6 +201,12 @@ def cmd_monitor(a, cfg):
         print("\nLocal monitor stopped.")
 
 
+def cmd_dashboard(a, cfg):
+    from .dashboard import serve
+
+    serve(cfg, sim=a.sim, port=a.port, public_sim=a.public_sim)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="chaosai", description="AI-driven chaos engineering")
     p.add_argument("--config", default="config.yaml")
@@ -211,7 +217,7 @@ def main(argv=None):
     b.add_argument("--seconds", type=int)
     pl = sub.add_parser("plan", help="choose experiments (LLM if configured, else rule-based)")
     pl.add_argument("--n", type=int, default=3)
-    pl.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+    pl.add_argument("--planner", choices=("auto", "llm", "local", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
     pl.add_argument("--avoid-tested", action="store_true", help="deprioritize pairs from the latest run")
     r = sub.add_parser("run", help="run a plan with safety limits, then score and report")
@@ -223,12 +229,16 @@ def main(argv=None):
     rp.add_argument("--run")
     ag = sub.add_parser("agent", help="agent loop: plan, inject and analyze one experiment per round")
     ag.add_argument("--rounds", type=int, default=3)
-    ag.add_argument("--planner", choices=("auto", "llm", "rule-based"), default="auto",
+    ag.add_argument("--planner", choices=("auto", "llm", "local", "rule-based"), default="auto",
                     help="planner selection (default: auto, using Gemini when available)")
     sub.add_parser("monitor", help="watch a live cluster and diagnose manually injected faults with local Ollama")
     sub.add_parser("kill", help="panic button: stop and remove all chaosai experiments")
+    db = sub.add_parser("dashboard", help="open the local web control dashboard")
+    db.add_argument("--port", type=int, default=8765)
+    db.add_argument("--public-sim", action="store_true",
+                    help="serve the simulator publicly without login; requires --sim")
     a = p.parse_args(argv)
     cfg = config.load(a.config)
     {"map": cmd_map, "baseline": cmd_baseline, "plan": cmd_plan, "run": cmd_run, "fix": cmd_fix,
      "rerun": cmd_rerun, "report": cmd_report, "agent": cmd_agent, "monitor": cmd_monitor,
-     "kill": cmd_kill}[a.cmd](a, cfg)
+     "kill": cmd_kill, "dashboard": cmd_dashboard}[a.cmd](a, cfg)
