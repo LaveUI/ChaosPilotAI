@@ -1,0 +1,4 @@
+# Public read-only demo does not need Gemini, LangGraph or Kubernetes clients.
+pyyaml>=6.0,<7
+fastapi>=0.115,<1
+uvicorn>=0.30,<1

@@ -262,9 +262,10 @@ class ObserverAgent:
 class PlannerAgent:
     """Ranks candidate experiments and picks the next one. One decision per round, so it can react to results."""
 
-    def __init__(self, graph, cfg, mode="auto", llm_session=None):
+    def __init__(self, graph, cfg, mode="auto", llm_session=None, requested_experiment=None):
         self.graph, self.cfg = graph, cfg
         self.llm_session = llm_session
+        self.requested_experiment = requested_experiment
         if mode not in {"auto", "llm", "rule-based"}:
             raise ValueError(f"Unknown planner mode: {mode}")
         if mode == "llm" and not llm.available(cfg):
@@ -284,6 +285,7 @@ class PlannerAgent:
                 p = planner.plan(
                     self.graph, self.cfg, history, RANKED_CANDIDATES, mode="llm",
                     observation=obs, llm_metadata=metadata,
+                    requested_experiment=self.requested_experiment,
                 )
                 _record_llm_call(self.llm_session, "planner", metadata)
                 self.last_provenance = {"source": "Gemini", "llm": metadata}
@@ -337,6 +339,23 @@ class PlannerAgent:
                             for i, x in enumerate(ranked, 1)]
 
     def _decide_by_rules(self, history, tested, observation=None):
+        if self.requested_experiment:
+            service = self.requested_experiment["service"]
+            action = self.requested_experiment["action"]
+            node = _nodes(self.graph).get(service)
+            if not node or service in self.cfg["exclude_services"] or action not in self.cfg["allowlist"]:
+                raise ValueError("Requested experiment is not allowed by the service graph and configured safety policy.")
+            chosen = planner._finalize(
+                [{"service": service, "action": action,
+                  "rationale": "Operator-selected experiment, validated against the dependency map and allowlist."}],
+                self.graph, self.cfg,
+            )[0]
+            chosen["planner"] = "rule-based"
+            self.last_ranked = [{
+                "rank": 1, "service": service, "action": action, "rationale": chosen["rationale"],
+                "chosen": True, "already_tested": False,
+            }]
+            return chosen
         tried_actions = {h["action"] for h in history}
         concerns = set((observation or {}).get("concerns", []))
         times_hit, weak = {}, set()
@@ -410,6 +429,8 @@ class InjectorAgent:
 
     def preflight(self, exp, observation=None):
         """Return (reason to refuse or None, pre-flight probe readings)."""
+        if os.path.exists(self.guard.stop_file):
+            return "manual stop requested", []
         if exp["action"] not in self.cfg["allowlist"]:
             return f"action {exp['action']} is not on the allowlist", []
         if exp["service"] in self.cfg["exclude_services"]:
@@ -502,7 +523,7 @@ class InjectorAgent:
             print(f"  [Injector agent] rollback review failed ({exc.__class__.__name__}); continuing under the safety guard.")
         return None
 
-    def act(self, exp, history=(), observation=None):
+    def act(self, exp, history=(), observation=None, on_progress=None):
         """Return the experiment result, or None if refused (hard check) or "declined" (agent's choice)."""
         refusal, probes = self.preflight(exp, observation)
         if refusal:
@@ -531,6 +552,15 @@ class InjectorAgent:
         if not inject:
             print(f"  [Injector agent] ({source}) declined to inject: {reason}")
             return "declined"
+        stop_reason = self.guard.check(0.0, 0.0, 0)
+        if stop_reason:
+            exp["injector_decision"].update({
+                "approved": False,
+                "reason": stop_reason,
+                "source": "safety preflight",
+                "actual_duration_s": 0,
+            })
+            return None
         exp["duration_s"] = duration
         exp["injector"], exp["injector_reason"] = source, reason
         print(f"  [Injector agent] ({source}) injecting for {duration}s: {reason}")
@@ -540,7 +570,7 @@ class InjectorAgent:
         for attempt in (1, 2):
             try:
                 result = runner.run_experiment(exp, self.cfg, self.env, self.baseline, self.guard, self.run_dir,
-                                               on_sample=self.review)
+                                               on_sample=self.review, on_progress=on_progress)
                 break
             except RuntimeError as exc:
                 # The runner refuses to start when its own pre-experiment reading is unhealthy.
@@ -792,16 +822,17 @@ def _langgraph():
         return None
 
 
-def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, planner_mode="auto"):
+def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, planner_mode="auto",
+               requested_experiment=None, progress_callback=None, preserve_stop_file=False):
     """Run the agent graph: Observer -> Planner -> Injector -> Analyst, repeated, then the Reporter.
 
     The five agents are nodes of a LangGraph StateGraph. If LangGraph is not installed, the same
     nodes and the same routing run in a plain Python loop. Returns a results dict shaped like the
     one `run` produces, with the agents' decisions added."""
     guard = Guard(cfg, baseline, stop_file)
-    if os.path.exists(stop_file):
+    if os.path.exists(stop_file) and not preserve_stop_file:
         os.remove(stop_file)
-    planner_agent = PlannerAgent(graph, cfg, planner_mode)
+    planner_agent = PlannerAgent(graph, cfg, planner_mode, requested_experiment=requested_experiment)
     use_llm = planner_agent.mode == "llm"
     llm_session = {
         "enabled": use_llm,
@@ -829,15 +860,27 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
     def observer_node(state):
         i = state.get("round", 0) + 1
         print(f"\n=== Round {i} of {rounds} ===")
-        return {"round": i, "observation": observer_agent.observe(), "outcome": "observed"}
+        if progress_callback:
+            progress_callback({"phase": "observer", "round": i, "event": "started"})
+        observation = observer_agent.observe()
+        if progress_callback:
+            progress_callback({"phase": "observer", "round": i, "event": "finished",
+                               "summary": observation.get("summary"), "source": observation.get("source")})
+        return {"round": i, "observation": observation, "outcome": "observed"}
 
     def planner_node(state):
         observation = state["observation"]
+        if progress_callback:
+            progress_callback({"phase": "planner", "round": state["round"], "event": "started"})
         exp = planner_agent.decide(history, observation)
         if exp is None:
             print("  [Planner agent] nothing new left to test; stopping.")
             return {"exp": None, "outcome": "nothing_left"}
         exp["id"] = f"exp{state['round']}"
+        if progress_callback:
+            progress_callback({"phase": "planner", "round": state["round"], "event": "finished",
+                               "service": exp["service"], "action": exp["action"],
+                               "source": exp.get("planner")})
         ranked = planner_agent.last_ranked
         print(f"  [Planner agent] ({exp['planner']}) ranked {len(ranked)} candidate(s), "
               f"chose {ACTION_LABELS[exp['action']]} on {exp['service']}")
@@ -854,7 +897,10 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
 
     def injector_node(state):
         exp = state["exp"]
-        result = injector_agent.act(exp, history, state["observation"])
+        if progress_callback:
+            progress_callback({"phase": "injector", "round": state["round"], "event": "started",
+                               "service": exp["service"], "action": exp["action"]})
+        result = injector_agent.act(exp, history, state["observation"], on_progress=progress_callback)
         if round_log:
             round_log[-1]["injector_decision"] = exp.get("injector_decision")
         if result is None:
@@ -871,7 +917,12 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
 
     def analyst_node(state):
         result, exp = state["result"], state["exp"]
+        if progress_callback:
+            progress_callback({"phase": "analyst", "round": state["round"], "event": "started"})
         analyst_agent.explain(result)
+        if progress_callback:
+            progress_callback({"phase": "analyst", "round": state["round"], "event": "finished",
+                               "severity": result.get("severity"), "diagnosis": result.get("ai_diagnosis")})
         chosen.append(exp)
         done.append(result)
         entry = {k: result[k] for k in ("service", "action", "score", "error_rate", "p95_ms",
@@ -886,8 +937,12 @@ def run_agents(cfg, env, graph, baseline, rounds, run_id, run_dir, stop_file, pl
         return {"outcome": "analysed"}
 
     def reporter_node(state):
+        if progress_callback:
+            progress_callback({"phase": "reporter", "event": "started"})
         final.update(_finish(cfg, env, baseline, guard, planner_agent, reporter_agent, run_id,
                              chosen, done, round_log, orchestrator, llm_session))
+        if progress_callback:
+            progress_callback({"phase": "reporter", "event": "finished"})
         return {"outcome": "reported"}
 
     # ---------------- routing: which node runs next ----------------

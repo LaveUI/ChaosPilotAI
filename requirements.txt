@@ -5,3 +5,5 @@ google-genai>=1.0
 # Without these the same agents run in a plain Python loop.
 langgraph>=1.0
 langchain-google-genai>=4.0
+fastapi>=0.115
+uvicorn[standard]>=0.30

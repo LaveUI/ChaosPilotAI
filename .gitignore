@@ -21,6 +21,12 @@ graph.mmd
 baseline.json
 plan.json
 
+# Dashboard build and local dependencies
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+
 # Cloned sample app (setup.sh re-creates it)
 microservices-demo/
 
